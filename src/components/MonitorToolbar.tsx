@@ -1,9 +1,9 @@
-import { CheckCheck, Expand, FolderPlus, Grid3X3, MonitorUp, Save, SlidersHorizontal } from 'lucide-react';
+import { CheckCheck, Expand, FolderPlus, Grid3X3, MonitorUp, Save, SlidersHorizontal, Smartphone } from 'lucide-react';
 import { LAYOUTS, type DeviceGroup, type LayoutSize, type WorkspacePreset } from '../domain';
 
 interface Props {
   groups: DeviceGroup[]; workspaces: WorkspacePreset[]; activeWorkspaceId: string | null; groupId: string; layout: LayoutSize; selectedCount: number; workspaceName: string;
-  onGroup: (id: string) => void; onWorkspace: (id: string) => void; onLayout: (layout: LayoutSize) => void; onSelectAll: () => void; onWallOnly: () => void; onName: (value: string) => void; onSave: () => void; onCreateGroup: () => void;
+  onGroup: (id: string) => void; onWorkspace: (id: string) => void; onLayout: (layout: LayoutSize) => void; onSelectAll: () => void; onWallOnly: () => void; onName: (value: string) => void; onSave: () => void; onCreateGroup: () => void; onDeviceSetup: () => void;
 }
 
 export function MonitorToolbar(props: Props) {
@@ -13,6 +13,7 @@ export function MonitorToolbar(props: Props) {
     <div className="layout-control" aria-label="Monitor layout">{LAYOUTS.map(size => <button className={props.layout === size ? 'active' : ''} key={size} onClick={() => props.onLayout(size)} title={`${size} camera layout`}>{size}</button>)}</div>
     <div className="toolbar-spacer"/>
     <button className="tool-button" onClick={props.onSelectAll} title="Select all visible devices"><CheckCheck size={16}/><span>Select all</span>{props.selectedCount > 0 && <b>{props.selectedCount}</b>}</button>
+    <button className="tool-button setup-entry" onClick={props.onDeviceSetup} title="Detect and configure mobile devices"><Smartphone size={16}/><span>Device setup</span></button>
     <div className="workspace-save"><input aria-label="Workspace name" placeholder="Workspace name" value={props.workspaceName} onChange={event => props.onName(event.target.value)}/><button onClick={props.onSave} title="Save workspace"><Save size={16}/></button></div>
     <button className="icon-button" onClick={props.onCreateGroup} title="Create group from selection"><FolderPlus size={17}/></button>
     <button className="icon-button" title="Stream policy"><SlidersHorizontal size={17}/></button>

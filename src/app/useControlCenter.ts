@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LAYOUTS, type DeviceGroup, type LayoutSize, type WorkspacePreset } from '../domain';
-import type { DeviceDetailDTO, DeviceSummaryDTO, EventEnvelope, RuntimeSnapshot } from '../server/protocol';
+import type { DeviceConfigurationDTO, DeviceDetailDTO, DeviceSummaryDTO, DiscoveredDeviceDTO, EventEnvelope, RuntimeSnapshot } from '../server/protocol';
 import { ControlCenterClient, type ConnectionState, type DeviceAction } from './controlCenterClient';
 
 function readJSON<T>(key: string, fallback: T): T {
@@ -36,6 +36,9 @@ export function useControlCenter() {
   const [wallOnly, setWallOnly] = useState(false);
   const [lastAnchor, setLastAnchor] = useState<string | null>('device-01');
   const [toast, setToast] = useState<string | null>(null);
+  const [discoveredDevices, setDiscoveredDevices] = useState<DiscoveredDeviceDTO[]>([]);
+  const [connectionPanelOpen, setConnectionPanelOpen] = useState(false);
+  const [discoveryState, setDiscoveryState] = useState<'idle' | 'detecting' | 'ready' | 'failed'>('idle');
   const [workspaceName, setWorkspaceName] = useState('');
   const selectedId = fullscreenId ?? focusedId;
   const selectedIdRef = useRef(selectedId);
@@ -71,6 +74,10 @@ export function useControlCenter() {
 
     function applyEvent(event: EventEnvelope) {
       if (event.type === 'DEVICE_UPDATED' && event.payload.snapshot) {
+        const snapshot = event.payload.snapshot as DeviceSummaryDTO;
+        setDevices(current => current.map(device => device.id === snapshot.id ? snapshot : device));
+      }
+      if (event.type === 'DEVICE_CONFIGURED' && event.payload.snapshot) {
         const snapshot = event.payload.snapshot as DeviceSummaryDTO;
         setDevices(current => current.map(device => device.id === snapshot.id ? snapshot : device));
       }
@@ -116,6 +123,35 @@ export function useControlCenter() {
 
   const sendAction = useCallback((id: string, action: DeviceAction, appId?: string) => {
     void client.deviceAction(id, action, crypto.randomUUID(), appId).catch(error => setToast(error instanceof Error ? error.message : `${action} failed`));
+  }, [client]);
+
+  const discoverDevices = useCallback(() => {
+    setDiscoveryState('detecting');
+    void client.discoverDevices().then(found => {
+      setDiscoveredDevices(found);
+      setDiscoveryState('ready');
+    }).catch(error => {
+      setDiscoveryState('failed');
+      setToast(error instanceof Error ? error.message : 'Device discovery failed');
+    });
+  }, [client]);
+
+  const configureDevice = useCallback((configuration: DeviceConfigurationDTO) => {
+    void client.configureDevice(configuration).then(snapshot => {
+      setDevices(current => current.map(device => device.id === snapshot.id ? snapshot : device));
+      setFocusedId(snapshot.id);
+      setSelectedIds(new Set([snapshot.id]));
+      setToast(`${snapshot.name} configuration saved`);
+    }).catch(error => setToast(error instanceof Error ? error.message : 'Device configuration failed'));
+  }, [client]);
+
+  const connectDevice = useCallback((id: string) => {
+    void client.connectDevice(id).then(snapshot => {
+      setDevices(current => current.map(device => device.id === snapshot.id ? snapshot : device));
+      setFocusedId(snapshot.id);
+      setSelectedIds(new Set([snapshot.id]));
+      setToast(`${snapshot.name} connected`);
+    }).catch(error => setToast(error instanceof Error ? error.message : 'Device connection failed'));
   }, [client]);
 
   const setGroupId = (nextId: string) => {
@@ -214,6 +250,7 @@ export function useControlCenter() {
     setLayout: setLayoutState, setGroupId, setWorkspace, selectDevice, toggleCheckbox, selectAll, clearSelection, closeInspector,
     setFullscreenId, setWallOnly, runBatch, applyBatchAction, toggleOffline, takeHumanControl: (id: string) => sendAction(id, 'take-control'),
     pauseDevice: (id: string) => sendAction(id, 'pause'), resumeDevice: (id: string) => sendAction(id, 'resume'), retryDevice: (id: string) => sendAction(id, 'retry'),
-    setWorkspaceName, saveWorkspace, createCustomGroup,
+    setWorkspaceName, saveWorkspace, createCustomGroup, discoveredDevices, connectionPanelOpen, setConnectionPanelOpen,
+    discoveryState, discoverDevices, configureDevice, connectDevice,
   };
 }

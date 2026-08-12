@@ -1,4 +1,4 @@
-import type { AgentStatus, DeviceSession, DeviceStatus, HealthState, Platform, TaskInstance } from './types';
+import type { AgentStatus, DeviceConfiguration, DeviceConnectionState, DeviceSession, DeviceStatus, HealthState, Platform, TaskInstance } from './types';
 import { StreamManager } from './streamManager';
 
 const apps = ['Omni Market', 'Messages', 'Settings', 'Field Ops', 'Maps', 'Account Hub'];
@@ -28,6 +28,8 @@ export class DeviceManager {
         healthState: { state: health, lastCheckAt: Date.now(), adbConnected: status === 'ONLINE', screenResponsive: status === 'ONLINE', appAlive: status === 'ONLINE', agentAlive: status === 'ONLINE' },
         agentSession: { id: `agent-${id}`, deviceId: id, status: agentStatus, workerId: index < 8 ? `worker-${index + 1}` : null, lastScreenshotAt: task ? Date.now() : null },
         deviceDriver: { deviceId: id, platform, transport: platform === 'ANDROID' ? 'ADB' : 'XCUITEST', connected: status === 'ONLINE' },
+        configuration: null,
+        connection: { state: status === 'ONLINE' ? 'CONNECTED' : 'DISCONNECTED', lastAttemptAt: null, connectedAt: status === 'ONLINE' ? Date.now() : null, error: null },
         screenStream: { deviceId: id, profile: stream, transport: platform === 'ANDROID' ? 'SCRCPY' : 'IOS_MIRROR', aiCaptureMode: 'SCREENSHOT_DRIVEN' },
         agentRuntime: { deviceId: id, sessionId: `runtime-${id}`, persistentWorker: false, analyzeVideo: false },
         currentApp: status === 'OFFLINE' ? 'Unavailable' : apps[index % apps.length],
@@ -58,6 +60,28 @@ export class DeviceManager {
   get(id: string): DeviceSession | undefined { return this.sessions.get(id); }
   count(): number { return this.sessions.size; }
 
+  configure(id: string, configuration: DeviceConfiguration): DeviceSession | undefined {
+    return this.update(id, session => ({
+      ...session,
+      name: configuration.name,
+      currentApp: configuration.appId,
+      configuration,
+    }));
+  }
+
+  setConnectionState(id: string, state: DeviceConnectionState, error: string | null = null): void {
+    this.update(id, session => ({
+      ...session,
+      connection: {
+        ...session.connection,
+        state,
+        lastAttemptAt: state === 'CONNECTING' || state === 'FAILED' ? Date.now() : session.connection.lastAttemptAt,
+        connectedAt: state === 'CONNECTED' ? Date.now() : session.connection.connectedAt,
+        error,
+      },
+    }));
+  }
+
   update(id: string, updater: (session: DeviceSession) => DeviceSession): DeviceSession | undefined {
     const current = this.sessions.get(id);
     if (!current) return undefined;
@@ -73,6 +97,7 @@ export class DeviceManager {
       health: 'OFFLINE',
       healthState: { ...session.healthState, state: 'OFFLINE', lastCheckAt: Date.now(), adbConnected: false, screenResponsive: false, appAlive: false },
       deviceDriver: { ...session.deviceDriver, connected: false },
+      connection: { ...session.connection, state: 'DISCONNECTED', error: 'Device connection lost' },
       agentStatus: 'ERROR',
       agentSession: { ...session.agentSession, status: 'ERROR', workerId: null },
       metrics: { ...session.metrics, fps: 0, network: 'OFFLINE' },
@@ -93,6 +118,7 @@ export class DeviceManager {
       health: 'HEALTHY',
       healthState: { state: 'HEALTHY', lastCheckAt: Date.now(), adbConnected: true, screenResponsive: true, appAlive: true, agentAlive: true },
       deviceDriver: { ...session.deviceDriver, connected: true },
+      connection: { ...session.connection, state: 'CONNECTED', connectedAt: Date.now(), error: null },
       agentStatus: session.currentTask?.status === 'DEVICE_OFFLINE' ? 'PAUSED' : 'IDLE',
       agentSession: { ...session.agentSession, status: session.currentTask?.status === 'DEVICE_OFFLINE' ? 'PAUSED' : 'IDLE' },
       metrics: { ...session.metrics, fps: 5, network: 'WIFI' },

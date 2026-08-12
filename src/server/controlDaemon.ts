@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ZodError } from 'zod';
-import { ControlPlane, DeviceManager, DriverRegistry, SessionManager, SimulatedDeviceDriver, TaskScheduler } from '../domain';
+import { ControlPlane, DeviceDiscovery, DeviceManager, DriverRegistry, SessionManager, SimulatedDeviceDriver, TaskScheduler } from '../domain';
 import type { DeviceSession, TaskInstance, TaskStatus } from '../domain/types';
 import { EventStore } from './eventStore';
 import {
   batchTaskCommandSchema,
   cloneSnapshot,
+  configureDeviceCommandSchema,
+  connectDeviceCommandSchema,
   deviceCommandSchema,
   launchAppCommandSchema,
   protocolVersion,
@@ -56,6 +58,7 @@ export class ControlDaemon {
   readonly scheduler: TaskScheduler;
   readonly drivers: DriverRegistry;
   readonly controlPlane: ControlPlane;
+  readonly discovery: DeviceDiscovery;
   readonly events = new EventStore();
   readonly startedAt = Date.now();
   readonly sessionEpoch = randomUUID();
@@ -71,6 +74,7 @@ export class ControlDaemon {
 
   constructor(options: ControlDaemonOptions = {}) {
     this.devices = new DeviceManager(options.deviceCount ?? 32);
+    this.discovery = new DeviceDiscovery(this.devices);
     this.sessions = new SessionManager(this.devices);
     this.scheduler = new TaskScheduler(concurrency);
     this.drivers = new DriverRegistry();
@@ -150,6 +154,56 @@ export class ControlDaemon {
     }
   }
 
+  discoverDevices() {
+    const candidates = this.discovery.discover();
+    candidates.forEach(candidate => this.events.append('DEVICE_DISCOVERED', {
+      deviceId: candidate.deviceId,
+      payload: { candidate: cloneSnapshot(candidate) },
+    }));
+    return candidates;
+  }
+
+  configureDevice(configuration: Omit<Parameters<DeviceManager['configure']>[1], 'configuredAt'>): DeviceSummaryDTO {
+    const candidate = this.discovery.getByDeviceId(configuration.deviceId);
+    const session = this.devices.get(configuration.deviceId);
+    if (!candidate || !session) throw new HttpError(404, 'Device candidate not found');
+    if (candidate.platform !== configuration.platform || candidate.transport !== configuration.transport) {
+      throw new HttpError(400, 'Device platform and transport do not match the discovered candidate');
+    }
+    if (candidate.identifier !== configuration.identifier) {
+      throw new HttpError(400, 'Device identifier does not match the discovered candidate');
+    }
+    const updated = this.devices.configure(configuration.deviceId, { ...configuration, configuredAt: Date.now() });
+    if (!updated) throw new HttpError(404, 'Device not found');
+    const summary = toDeviceSummary(updated);
+    this.events.append('DEVICE_CONFIGURED', { deviceId: updated.id, payload: { snapshot: summary } });
+    this.publishChanges();
+    return summary;
+  }
+
+  async connectDevice(deviceId: string): Promise<DeviceSummaryDTO> {
+    const session = this.devices.get(deviceId);
+    if (!session) throw new HttpError(404, 'Device not found');
+    if (!session.configuration) throw new HttpError(409, 'Configure the device before connecting');
+    this.devices.setConnectionState(deviceId, 'CONNECTING');
+    this.events.append('DEVICE_CONNECTING', { deviceId, payload: { platform: session.platform } });
+    this.publishChanges();
+    try {
+      await this.drivers.get(deviceId).connect();
+      this.devices.recover(deviceId);
+      const connected = this.devices.get(deviceId)!;
+      this.events.append('DEVICE_CONNECTED', { deviceId, payload: { snapshot: toDeviceSummary(connected) } });
+      this.publishChanges();
+      return toDeviceSummary(connected);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Device connection failed';
+      this.devices.setConnectionState(deviceId, 'FAILED', message);
+      this.events.append('DEVICE_CONNECTION_FAILED', { deviceId, payload: { error: message } });
+      this.publishChanges();
+      throw new HttpError(503, message);
+    }
+  }
+
   applyStreamPolicy(command: { layout: 1 | 4 | 8 | 9 | 16 | 25 | 32; focusedId: string | null; fullscreenId: string | null; visibleDeviceIds: string[] }): void {
     this.sessions.applyStreamPolicy(command.layout, command.focusedId, command.fullscreenId, command.visibleDeviceIds);
     this.publishChanges();
@@ -164,6 +218,9 @@ export class ControlDaemon {
     try {
       if (request.method === 'GET' && url.pathname === '/api/devices') {
         return this.json(response, { version: protocolVersion, devices: this.devices.getAll().map(toDeviceSummary) });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/devices/discovery') {
+        return this.json(response, { version: protocolVersion, devices: this.discoverDevices() });
       }
       if (request.method === 'GET' && url.pathname === '/api/runtime') return this.json(response, this.snapshot());
       if (request.method === 'GET' && url.pathname === '/api/events') {
@@ -184,6 +241,27 @@ export class ControlDaemon {
         const result = await this.idempotent(command.commandId, command, async () => ({
           status: 202,
           payload: { version: protocolVersion, commandId: command.commandId, tasks: await this.executeBatch(command) },
+        }));
+        return this.json(response, result.payload, result.status);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/devices/configure') {
+        const command = configureDeviceCommandSchema.parse(await this.body(request));
+        const result = await this.idempotent(command.commandId, command, async () => ({
+          status: 200,
+          payload: { version: protocolVersion, commandId: command.commandId, device: this.configureDevice(command.configuration) },
+        }));
+        return this.json(response, result.payload, result.status);
+      }
+
+      const connectPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/connect$/);
+      if (request.method === 'POST' && connectPath) {
+        const deviceId = this.decodeId(connectPath[1]);
+        const command = connectDeviceCommandSchema.parse(await this.body(request));
+        if (command.deviceId !== deviceId) throw new HttpError(400, 'deviceId does not match URL');
+        const result = await this.idempotent(command.commandId, command, async () => ({
+          status: 200,
+          payload: { version: protocolVersion, commandId: command.commandId, device: await this.connectDevice(deviceId) },
         }));
         return this.json(response, result.payload, result.status);
       }

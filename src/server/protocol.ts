@@ -14,6 +14,8 @@ import type {
   TaskInstance,
   TimelineEvent,
 } from '../domain/types';
+import type { DeviceConfiguration, DeviceConnection } from '../domain/types';
+import type { DiscoveredDevice } from '../domain/deviceDiscovery';
 
 export const protocolVersion = 'v1' as const;
 
@@ -34,7 +36,11 @@ export interface DeviceSummaryDTO {
   queuedTaskCount: number;
   screenshotSeed: number;
   sessionRevision: number;
+  configuration: DeviceConfiguration | null;
+  connection: DeviceConnection;
 }
+
+export type DiscoveredDeviceDTO = DiscoveredDevice;
 
 export interface DeviceDetailDTO extends DeviceSummaryDTO {
   agentSessionId: string;
@@ -71,7 +77,12 @@ export type EventType =
   | 'WORKER_POOL_UPDATED'
   | 'HEALTH_UPDATED'
   | 'HUMAN_CONTROL_STARTED'
-  | 'HUMAN_CONTROL_RELEASED';
+  | 'HUMAN_CONTROL_RELEASED'
+  | 'DEVICE_DISCOVERED'
+  | 'DEVICE_CONFIGURED'
+  | 'DEVICE_CONNECTING'
+  | 'DEVICE_CONNECTED'
+  | 'DEVICE_CONNECTION_FAILED';
 
 export interface EventEnvelope {
   version: typeof protocolVersion;
@@ -93,6 +104,7 @@ export const eventEnvelopeSchema = z.object({
     'DEVICE_ADDED', 'DEVICE_UPDATED', 'DEVICE_OFFLINE', 'DEVICE_RECOVERED',
     'TASK_CREATED', 'TASK_QUEUED', 'TASK_STARTED', 'TASK_PAUSED', 'TASK_COMPLETED', 'TASK_FAILED',
     'WORKER_POOL_UPDATED', 'HEALTH_UPDATED', 'HUMAN_CONTROL_STARTED', 'HUMAN_CONTROL_RELEASED',
+    'DEVICE_DISCOVERED', 'DEVICE_CONFIGURED', 'DEVICE_CONNECTING', 'DEVICE_CONNECTED', 'DEVICE_CONNECTION_FAILED',
   ]),
   deviceId: z.string().nullable(),
   taskId: z.string().nullable(),
@@ -126,6 +138,30 @@ export const streamPolicyCommandSchema = commandBase.extend({
   targetDeviceIds: z.array(z.string().trim().min(1)).min(1).max(128),
 });
 
+const platformSchema = z.enum(['ANDROID', 'IOS']);
+export const deviceConfigurationSchema = z.object({
+  deviceId: z.string().trim().min(1),
+  platform: platformSchema,
+  name: z.string().trim().min(1).max(120),
+  identifier: z.string().trim().min(1).max(240),
+  appId: z.string().trim().min(1).max(240),
+  transport: z.enum(['ADB', 'XCUITEST']),
+  orientation: z.literal('PORTRAIT'),
+  wdaBundleId: z.string().trim().max(240).optional(),
+});
+
+export const configureDeviceCommandSchema = commandBase.extend({
+  configuration: deviceConfigurationSchema,
+});
+
+export const connectDeviceCommandSchema = deviceCommandSchema;
+
+export type DeviceConfigurationDTO = Omit<DeviceConfiguration, 'configuredAt'>;
+export type ConfiguredDeviceConfigurationDTO = DeviceConfiguration;
+export interface ConnectionAttemptDTO extends DeviceConnection {
+  deviceId: string;
+}
+
 export type BatchTaskCommand = z.infer<typeof batchTaskCommandSchema>;
 export type DeviceCommand = z.infer<typeof deviceCommandSchema>;
 export type LaunchAppCommand = z.infer<typeof launchAppCommandSchema>;
@@ -149,6 +185,8 @@ export const toDeviceSummary = (session: DeviceSession): DeviceSummaryDTO => clo
   queuedTaskCount: session.taskQueue.length,
   screenshotSeed: session.screenshotSeed,
   sessionRevision: session.sessionRevision,
+  configuration: session.configuration,
+  connection: session.connection,
 });
 
 export const toDeviceDetail = (session: DeviceSession): DeviceDetailDTO => cloneSnapshot({

@@ -1,5 +1,6 @@
 export * from './types';
 export * from './deviceManager';
+export * from './deviceDiscovery';
 export * from './sessionManager';
 export * from './streamManager';
 export * from './taskScheduler';

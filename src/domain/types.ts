@@ -6,6 +6,7 @@ export type AgentStatus = 'IDLE' | 'WAITING' | 'RUNNING' | 'PAUSED' | 'HUMAN_CON
 export type TaskStatus = 'IDLE' | 'WAITING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'PAUSED' | 'STOPPED' | 'DEVICE_OFFLINE';
 export type HealthState = 'HEALTHY' | 'DEGRADED' | 'OFFLINE';
 export type StreamMode = 'BACKGROUND' | 'PREVIEW' | 'FOCUSED' | 'FULLSCREEN';
+export type DeviceConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'FAILED';
 
 export interface DeviceMetrics {
   fps: number;
@@ -78,6 +79,25 @@ export interface DeviceDriverState {
   connected: boolean;
 }
 
+export interface DeviceConfiguration {
+  deviceId: string;
+  platform: Platform;
+  name: string;
+  identifier: string;
+  appId: string;
+  transport: 'ADB' | 'XCUITEST';
+  orientation: 'PORTRAIT';
+  wdaBundleId?: string;
+  configuredAt: number;
+}
+
+export interface DeviceConnection {
+  state: DeviceConnectionState;
+  lastAttemptAt: number | null;
+  connectedAt: number | null;
+  error: string | null;
+}
+
 export interface ScreenStream {
   deviceId: string;
   profile: StreamProfile;
@@ -103,6 +123,8 @@ export interface DeviceSession {
   healthState: DeviceHealth;
   agentSession: AgentSession;
   deviceDriver: DeviceDriverState;
+  configuration: DeviceConfiguration | null;
+  connection: DeviceConnection;
   screenStream: ScreenStream;
   agentRuntime: AgentRuntime;
   currentApp: string;

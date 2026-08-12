@@ -1,4 +1,4 @@
-import { eventEnvelopeSchema, type DeviceDetailDTO, type DeviceSummaryDTO, type EventEnvelope, type RuntimeSnapshot, type StreamPolicyCommand, type BatchTaskCommand } from '../server/protocol';
+import { eventEnvelopeSchema, type DeviceConfigurationDTO, type DeviceDetailDTO, type DeviceSummaryDTO, type DiscoveredDeviceDTO, type EventEnvelope, type RuntimeSnapshot, type StreamPolicyCommand, type BatchTaskCommand } from '../server/protocol';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 export type DeviceAction = 'pause' | 'resume' | 'stop' | 'retry' | 'take-control' | 'release-control' | 'disconnect' | 'recover' | 'restart-app' | 'launch-app';
@@ -26,6 +26,27 @@ export class ControlCenterClient {
 
   async getDeviceDetail(deviceId: string, signal?: AbortSignal): Promise<DeviceDetailDTO> {
     const result = await this.request<{ device: DeviceDetailDTO }>(`/devices/${encodeURIComponent(deviceId)}`, { signal });
+    return result.device;
+  }
+
+  async discoverDevices(signal?: AbortSignal): Promise<DiscoveredDeviceDTO[]> {
+    const result = await this.request<{ devices: DiscoveredDeviceDTO[] }>('/devices/discovery', { signal });
+    return result.devices;
+  }
+
+  async configureDevice(configuration: DeviceConfigurationDTO, commandId = crypto.randomUUID()): Promise<DeviceSummaryDTO> {
+    const result = await this.request<{ device: DeviceSummaryDTO }>('/devices/configure', {
+      method: 'POST',
+      body: { commandId, timestamp: Date.now(), configuration },
+    });
+    return result.device;
+  }
+
+  async connectDevice(deviceId: string, commandId = crypto.randomUUID()): Promise<DeviceSummaryDTO> {
+    const result = await this.request<{ device: DeviceSummaryDTO }>(`/devices/${encodeURIComponent(deviceId)}/connect`, {
+      method: 'POST',
+      body: { commandId, deviceId, timestamp: Date.now() },
+    });
     return result.device;
   }
 

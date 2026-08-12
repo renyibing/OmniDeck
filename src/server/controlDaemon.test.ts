@@ -56,6 +56,50 @@ describe('Control Daemon HTTP/SSE protocol', () => {
     expect(device).toHaveProperty('logs');
   });
 
+  it('discovers, configures, and connects one Android and one iOS session without replacing them', async () => {
+    const { baseUrl, daemon } = await start();
+    const beforeAndroid = await json(baseUrl, '/api/devices/device-01');
+    const beforeIOS = await json(baseUrl, '/api/devices/device-03');
+    const discovery = await json(baseUrl, '/api/devices/discovery');
+    const candidates = discovery.body.devices as Array<Record<string, unknown>>;
+
+    expect(discovery.response.status).toBe(200);
+    expect(candidates).toHaveLength(2);
+    expect(candidates.map(candidate => candidate.platform)).toEqual(['ANDROID', 'IOS']);
+    expect(candidates.every(candidate => candidate.simulated === true)).toBe(true);
+
+    const androidConfiguration = {
+      deviceId: 'device-01', platform: 'ANDROID', name: 'Android QA', identifier: 'omni-android-01',
+      appId: 'com.omnideck.market', transport: 'ADB', orientation: 'PORTRAIT',
+    };
+    const configured = await json(baseUrl, '/api/devices/configure', postBody({
+      commandId: 'configure-android-1', timestamp: Date.now(), configuration: androidConfiguration,
+    }));
+    const connected = await json(baseUrl, '/api/devices/device-01/connect', postBody({
+      commandId: 'connect-android-1', timestamp: Date.now(), deviceId: 'device-01',
+    }));
+    const afterAndroid = await json(baseUrl, '/api/devices/device-01');
+    const afterIOS = await json(baseUrl, '/api/devices/device-03');
+
+    expect(configured.response.status).toBe(200);
+    expect(connected.response.status).toBe(200);
+    expect((afterAndroid.body.device as Record<string, unknown>).name).toBe('Android QA');
+    expect((afterAndroid.body.device as Record<string, unknown>).sessionRevision).toBe((beforeAndroid.body.device as Record<string, unknown>).sessionRevision);
+    expect(((afterAndroid.body.device as Record<string, unknown>).connection as Record<string, unknown>).state).toBe('CONNECTED');
+    expect((afterIOS.body.device as Record<string, unknown>).sessionRevision).toBe((beforeIOS.body.device as Record<string, unknown>).sessionRevision);
+    expect(daemon.events.since(0).some(event => event.type === 'DEVICE_DISCOVERED')).toBe(true);
+    expect(daemon.events.since(0).some(event => event.type === 'DEVICE_CONFIGURED' && event.deviceId === 'device-01')).toBe(true);
+    expect(daemon.events.since(0).some(event => event.type === 'DEVICE_CONNECTED' && event.deviceId === 'device-01')).toBe(true);
+  });
+
+  it('requires configuration before connecting a discovered device', async () => {
+    const { baseUrl } = await start();
+    const result = await json(baseUrl, '/api/devices/device-03/connect', postBody({
+      commandId: 'connect-before-config-1', timestamp: Date.now(), deviceId: 'device-03',
+    }));
+    expect(result.response.status).toBe(409);
+  });
+
   it('validates commands and enforces URL/device target agreement', async () => {
     const { baseUrl } = await start();
     const invalid = await json(baseUrl, '/api/tasks/batch', postBody({ goal: 'missing command metadata' }));
