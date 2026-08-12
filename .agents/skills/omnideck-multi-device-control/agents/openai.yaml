@@ -1,0 +1,4 @@
+interface:
+  display_name: "OmniDeck Multi-Device Control"
+  short_description: "Build and validate isolated mobile device control"
+  default_prompt: "Use $omnideck-multi-device-control to implement and validate this multi-device control-center change."
