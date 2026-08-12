@@ -1,7 +1,7 @@
 import { ArrowLeft, Bot, Hand, Radio } from 'lucide-react';
-import type { DeviceSession } from '../domain';
+import type { DeviceSummaryDTO } from '../server/protocol';
 
-export function FullscreenDevice({ device, onClose, onTakeControl }: { device: DeviceSession; onClose: () => void; onTakeControl: (id: string) => void }) {
+export function FullscreenDevice({ device, onClose, onTakeControl }: { device: DeviceSummaryDTO; onClose: () => void; onTakeControl: (id: string) => void }) {
   const statusMessage = device.agentStatus === 'HUMAN_CONTROL'
     ? 'Agent execution is paused while manual control is active.'
     : 'Agent continues running independently while views change.';

@@ -11,6 +11,7 @@ export class SessionManager {
       const mode: StreamMode = fullscreenId === session.id ? 'FULLSCREEN' : selectedId === session.id ? 'FOCUSED' : visibleIds.includes(session.id) ? 'PREVIEW' : 'BACKGROUND';
       const stream = this.streamManager.getProfile(mode, layout);
       this.devices.update(session.id, current => {
+        if (current.stream.mode === stream.mode && current.stream.width === stream.width && current.stream.height === stream.height && current.stream.fps === stream.fps && current.stream.bitrateKbps === stream.bitrateKbps) return current;
         current.stream = stream;
         current.screenStream.profile = stream;
         return current;

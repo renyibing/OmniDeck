@@ -1,9 +1,9 @@
 import { BatteryMedium, Bot, Check, Cpu, Radio, Thermometer, Wifi, WifiOff } from 'lucide-react';
-import type { DeviceSession } from '../domain';
+import type { DeviceSummaryDTO } from '../server/protocol';
 
-interface Props { device: DeviceSession; selected: boolean; focused: boolean; dense: boolean; onSelect: (event: React.MouseEvent) => void; onToggle: () => void; onOpen: () => void }
+interface Props { device: DeviceSummaryDTO; selected: boolean; focused: boolean; dense: boolean; onSelect: (event: React.MouseEvent) => void; onToggle: () => void; onOpen: () => void }
 
-const agentLabel: Record<DeviceSession['agentStatus'], string> = { IDLE: 'IDLE', WAITING: 'WAITING', RUNNING: 'AI RUNNING', PAUSED: 'PAUSED', HUMAN_CONTROL: 'HUMAN', ERROR: 'ERROR' };
+const agentLabel: Record<DeviceSummaryDTO['agentStatus'], string> = { IDLE: 'IDLE', WAITING: 'WAITING', RUNNING: 'AI RUNNING', PAUSED: 'PAUSED', HUMAN_CONTROL: 'HUMAN', ERROR: 'ERROR' };
 
 export function DeviceTile({ device, selected, focused, dense, onSelect, onToggle, onOpen }: Props) {
   const stateClass = device.status === 'OFFLINE' ? 'offline' : device.agentStatus === 'RUNNING' ? 'running' : device.agentStatus === 'HUMAN_CONTROL' ? 'human' : device.status === 'ERROR' || device.health === 'DEGRADED' ? 'error' : 'idle';

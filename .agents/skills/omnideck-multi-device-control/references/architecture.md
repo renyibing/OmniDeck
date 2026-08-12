@@ -35,6 +35,24 @@ TaskScheduler
 | UI orchestration/persistence | `src/app/useControlCenter.ts` |
 | Wall tiles and inspector | `src/components/` |
 
+## Control Daemon boundary
+
+```text
+React DTO state
+  HTTP snapshots/commands + SSE replay
+Local ControlDaemon
+  DeviceManager -> stable DeviceSession[deviceId]
+  SessionManager -> stream policy only
+  TaskScheduler -> independent TaskInstance + bounded workers/resources
+  ControlPlane -> device-scoped execution and lifecycle
+  DriverRegistry -> simulated driver adapters in this phase
+  EventStore -> ordered in-memory event replay
+```
+
+`DeviceSummaryDTO` is the wall contract and excludes histories, memory, task context, and driver internals. `DeviceDetailDTO` is loaded only for the selected device. `sessionEpoch` identifies the daemon process and `sessionRevision` identifies a stable device session; neither changes for layout, fullscreen, inspector, or page refresh while the daemon remains running.
+
+Commands are validated with Zod and require `commandId`, `timestamp`, and explicit device target IDs. The daemon caches successful command results to make transport retries idempotent and rejects conflicting reuse of a command ID.
+
 ## State rules
 
 - Registry keys are stable physical/logical device IDs.

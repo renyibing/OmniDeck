@@ -13,7 +13,7 @@ export default function App() {
   if (fullscreenDevice) return <FullscreenDevice device={fullscreenDevice} onClose={() => center.setFullscreenId(null)} onTakeControl={center.takeHumanControl}/>;
 
   return <div className={`app-shell ${center.wallOnly ? 'wall-only' : ''}`}>
-    {!center.wallOnly && <StatusBar stats={center.stats} workers={center.workerSnapshot}/>}
+    {!center.wallOnly && <StatusBar stats={center.stats} workers={center.workerSnapshot} connection={center.connection}/>}
     {!center.wallOnly && <MonitorToolbar groups={center.groups} workspaces={center.workspaces} activeWorkspaceId={center.activeWorkspaceId} groupId={center.groupId} layout={center.layout} selectedCount={center.selectedIds.size} workspaceName={center.workspaceName} onGroup={center.setGroupId} onWorkspace={center.setWorkspace} onLayout={center.setLayout} onSelectAll={center.selectAll} onWallOnly={() => center.setWallOnly(true)} onName={center.setWorkspaceName} onSave={center.saveWorkspace} onCreateGroup={center.createCustomGroup}/>}
     <main className="control-surface">
       <section className="wall-section">

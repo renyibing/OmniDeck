@@ -23,6 +23,9 @@ Work from the repository root. Inspect current code before changing it.
 6. Stop in-flight device actions on disconnect, mark the task `DEVICE_OFFLINE`, and preserve enough context to resume after recovery.
 7. Render only thumbnail/basic state per wall tile. Mount detailed timeline, logs, UI tree, thoughts, and screenshot history for the selected device only.
 8. Require explicit per-device authorization and audit events for human takeover and device actions. Never log secrets, account credentials, raw tokens, or sensitive screenshot content by default.
+9. Keep the Control Daemon as the only owner of live domain state. React may retain DTO snapshots and view state, but must not construct `DeviceManager`, `SessionManager`, `TaskScheduler`, `ControlPlane`, drivers, or `DeviceSession` instances.
+10. Use HTTP for snapshots and commands and SSE for ordered events. Commands must carry a unique `commandId`, timestamp, and explicit target IDs; command retries must be idempotent.
+11. Keep public wall DTOs lightweight. Fetch timeline, logs, UI tree, task history, memory, and task context only through the selected-device detail route.
 
 ## Implementation workflow
 
@@ -31,7 +34,8 @@ Work from the repository root. Inspect current code before changing it.
 3. Keep domain logic independent of React. UI components consume snapshots and dispatch device-scoped commands.
 4. Add focused unit tests for session identity, per-device isolation, scheduling, stream policy, and offline behavior.
 5. For visual changes, run the app and inspect 8, 16, and 32 layouts at desktop and narrow viewports. Exercise single click, multi-select, double click, ESC return, and batch actions.
-6. Run `scripts/validate_omnideck.sh` before handing off.
+6. For daemon changes, exercise the HTTP routes, event replay from a sequence, reconnect resync, refresh identity, idempotent command retry, offline recovery, explicit resume, and human takeover through integration tests.
+7. Run `scripts/validate_omnideck.sh` before handing off.
 
 ## Safety boundaries
 
@@ -43,4 +47,4 @@ Work from the repository root. Inspect current code before changing it.
 
 ## Completion contract
 
-Report changed modules, verified layouts/device counts, test commands, and any requirement that remains simulated. Do not claim real-device validation when only simulated sessions were exercised.
+Report changed modules, verified layouts/device counts, test commands, service/browser connection behavior, and any requirement that remains simulated. Do not claim real-device validation when only simulated sessions were exercised.

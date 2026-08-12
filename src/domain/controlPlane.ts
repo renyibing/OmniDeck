@@ -187,6 +187,15 @@ export class ControlPlane {
     this.emit();
   }
 
+  releaseHumanControl(deviceId: string): void {
+    const session = this.devices.get(deviceId);
+    if (!session || session.agentStatus !== 'HUMAN_CONTROL') return;
+    session.agentStatus = session.currentTask ? 'PAUSED' : 'IDLE';
+    session.agentSession.status = session.agentStatus;
+    this.record(session, 'SYSTEM', 'Human control released; agent remains paused');
+    this.emit();
+  }
+
   async setOffline(deviceId: string): Promise<void> {
     const session = this.devices.get(deviceId);
     if (!session) return;

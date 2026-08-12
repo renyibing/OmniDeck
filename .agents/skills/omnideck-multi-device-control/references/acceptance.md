@@ -15,6 +15,14 @@
 | Streams | Selected/fullscreen/preview/background profiles follow policy |
 | AI observation | AI uses on-demand high-resolution screenshots and never continuous video analysis |
 
+## Control Daemon checks
+
+- `GET /api/runtime` exposes 32 summaries with a stable `sessionEpoch`; repeated reload-like reads do not create sessions.
+- `GET /api/devices/:deviceId` is the only public route that returns timeline/task-history detail.
+- Batch and device commands reject malformed input, require explicit IDs, and return the same result for a retried `commandId`.
+- `GET /api/events?since=N` replays events in strictly increasing sequence order; the client performs a full runtime resync before reconnecting.
+- API integration tests cover worker configuration (`maxConcurrentAI=8`, `maxConcurrentVLM=4`), isolated disconnect, recovery with explicit resume, and human takeover.
+
 ## Browser validation
 
 Verify desktop 8, 16, and 32 layouts plus a narrow viewport:

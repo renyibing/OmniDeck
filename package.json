@@ -4,20 +4,27 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k \"npm:dev:daemon\" \"npm:dev:web\"",
+    "dev:web": "vite",
+    "dev:daemon": "tsx watch src/server/index.ts",
+    "start:daemon": "tsx src/server/index.ts",
     "build": "tsc -b && vite build",
     "test": "vitest run",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "lucide-react": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/node": "^26.2.0",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "concurrently": "^10.0.4",
+    "tsx": "^4.23.12",
     "typescript": "latest",
     "vite": "latest",
     "vitest": "latest"

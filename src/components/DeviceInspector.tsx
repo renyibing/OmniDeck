@@ -1,7 +1,7 @@
 import { Activity, BatteryMedium, Bot, CirclePause, CirclePlay, Cpu, ExternalLink, Hand, ListTree, Radio, RotateCcw, ScrollText, Smartphone, Thermometer, Wifi, X } from 'lucide-react';
-import type { DeviceSession } from '../domain';
+import type { DeviceDetailDTO, DeviceSummaryDTO } from '../server/protocol';
 
-interface Props { device: DeviceSession | null; onClose: () => void; onFullscreen: (id: string) => void; onOffline: (id: string) => void; onTakeControl: (id: string) => void; onPause: (id: string) => void; onResume: (id: string) => void; onRetry: (id: string) => void }
+interface Props { device: (DeviceSummaryDTO | DeviceDetailDTO) | null; onClose: () => void; onFullscreen: (id: string) => void; onOffline: (id: string) => void; onTakeControl: (id: string) => void; onPause: (id: string) => void; onResume: (id: string) => void; onRetry: (id: string) => void }
 
 export function DeviceInspector({ device, onClose, onFullscreen, onOffline, onTakeControl, onPause, onResume, onRetry }: Props) {
   if (!device) return <aside className="inspector empty-inspector"><Smartphone size={28}/><strong>No device selected</strong></aside>;
@@ -26,7 +26,7 @@ export function DeviceInspector({ device, onClose, onFullscreen, onOffline, onTa
     </section>
     <section className="inspector-section timeline">
       <div className="section-title"><span><ListTree size={14}/> AGENT TIMELINE</span><small>LIVE</small></div>
-      <div className="timeline-list">{device.actionHistory.map(event => <div className={`timeline-event ${event.kind.toLowerCase()}`} key={event.id}><i/><time>{event.time}</time><div><b>{event.kind}</b><p>{event.message}</p></div></div>)}</div>
+      <div className="timeline-list">{'actionHistory' in device ? device.actionHistory.map(event => <div className={`timeline-event ${event.kind.toLowerCase()}`} key={event.id}><i/><time>{event.time}</time><div><b>{event.kind}</b><p>{event.message}</p></div></div>) : <p className="detail-loading">Loading selected-device timeline...</p>}</div>
     </section>
     <section className="inspector-section info-grid">
       <div className="section-title"><span><Activity size={14}/> DEVICE HEALTH</span><b className={device.health.toLowerCase()}>{device.health}</b></div>
