@@ -29,6 +29,8 @@ TaskScheduler
 | Adaptive profiles and AI captures | `src/domain/streamManager.ts` |
 | Batch expansion and analysis flow | `src/domain/taskScheduler.ts` |
 | Worker/resource/rate limits | `src/domain/workerPool.ts` |
+| Device-scoped execution lifecycle | `src/domain/controlPlane.ts` |
+| Platform driver contract/registry | `src/domain/deviceDriver.ts` |
 | Health classification | `src/domain/healthMonitor.ts` |
 | UI orchestration/persistence | `src/app/useControlCenter.ts` |
 | Wall tiles and inspector | `src/components/` |

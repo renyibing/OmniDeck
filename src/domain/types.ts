@@ -35,6 +35,9 @@ export interface TaskInstance {
   attempts: number;
   createdAt: number;
   updatedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  error?: string;
 }
 
 export interface TimelineEvent {
@@ -68,7 +71,7 @@ export interface DeviceHealth {
   agentAlive: boolean;
 }
 
-export interface DeviceDriver {
+export interface DeviceDriverState {
   deviceId: string;
   platform: Platform;
   transport: 'ADB' | 'XCUITEST';
@@ -99,7 +102,7 @@ export interface DeviceSession {
   health: HealthState;
   healthState: DeviceHealth;
   agentSession: AgentSession;
-  deviceDriver: DeviceDriver;
+  deviceDriver: DeviceDriverState;
   screenStream: ScreenStream;
   agentRuntime: AgentRuntime;
   currentApp: string;
@@ -108,6 +111,7 @@ export interface DeviceSession {
   stream: StreamProfile;
   currentTask: TaskInstance | null;
   taskQueue: TaskInstance[];
+  taskHistory: TaskInstance[];
   taskContext: TaskContext;
   actionHistory: TimelineEvent[];
   memory: Record<string, unknown>;

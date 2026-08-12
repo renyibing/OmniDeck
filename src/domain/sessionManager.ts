@@ -10,7 +10,11 @@ export class SessionManager {
     this.devices.getAll().forEach(session => {
       const mode: StreamMode = fullscreenId === session.id ? 'FULLSCREEN' : selectedId === session.id ? 'FOCUSED' : visibleIds.includes(session.id) ? 'PREVIEW' : 'BACKGROUND';
       const stream = this.streamManager.getProfile(mode, layout);
-      this.devices.update(session.id, current => ({ ...current, stream, screenStream: { ...current.screenStream, profile: stream }, sessionRevision: current.sessionRevision }));
+      this.devices.update(session.id, current => {
+        current.stream = stream;
+        current.screenStream.profile = stream;
+        return current;
+      });
     });
   }
 

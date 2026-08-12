@@ -12,3 +12,4 @@ output/
 playwright-report/
 test-results/
 *.log
+.playwright-cli/

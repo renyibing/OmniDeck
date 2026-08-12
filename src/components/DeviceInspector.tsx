@@ -1,15 +1,15 @@
 import { Activity, BatteryMedium, Bot, CirclePause, CirclePlay, Cpu, ExternalLink, Hand, ListTree, Radio, RotateCcw, ScrollText, Smartphone, Thermometer, Wifi, X } from 'lucide-react';
 import type { DeviceSession } from '../domain';
 
-interface Props { device: DeviceSession | null; onClose: () => void; onFullscreen: (id: string) => void; onOffline: (id: string) => void }
+interface Props { device: DeviceSession | null; onClose: () => void; onFullscreen: (id: string) => void; onOffline: (id: string) => void; onTakeControl: (id: string) => void; onPause: (id: string) => void; onResume: (id: string) => void; onRetry: (id: string) => void }
 
-export function DeviceInspector({ device, onClose, onFullscreen, onOffline }: Props) {
+export function DeviceInspector({ device, onClose, onFullscreen, onOffline, onTakeControl, onPause, onResume, onRetry }: Props) {
   if (!device) return <aside className="inspector empty-inspector"><Smartphone size={28}/><strong>No device selected</strong></aside>;
   return <aside className="inspector">
     <div className="inspector-head"><div><span>DEVICE INSPECTOR</span><strong>{device.name}</strong><small>{device.model} · {device.id}</small></div><button onClick={onClose} title="Close inspector"><X size={17}/></button></div>
     <div className="inspector-live">
       <div className={`mini-live screen-${device.screenshotSeed}`}><div className="live-app"><span>{device.currentApp}</span><strong>{device.status === 'OFFLINE' ? 'Connection unavailable' : 'Live session'}</strong></div></div>
-      <button className="takeover-button"><Hand size={15}/> Take control</button>
+      <button className="takeover-button" onClick={() => onTakeControl(device.id)}><Hand size={15}/> Take control</button>
       <button className="open-live" onClick={() => onFullscreen(device.id)} title="Open large view"><ExternalLink size={16}/></button>
     </div>
     <div className="quick-stats">
@@ -22,7 +22,7 @@ export function DeviceInspector({ device, onClose, onFullscreen, onOffline }: Pr
       <div className="section-title"><span><Bot size={14}/> ACTIVE TASK</span><b className={device.currentTask?.status.toLowerCase()}>{device.currentTask?.status ?? 'IDLE'}</b></div>
       <strong>{device.currentTask?.goal ?? 'Agent is ready for a new goal'}</strong>
       {device.currentTask && <div className="progress"><i style={{ width: device.currentTask.status === 'WAITING' ? '8%' : '62%' }}/></div>}
-      <div className="task-actions"><button title="Pause"><CirclePause size={15}/></button><button title="Resume"><CirclePlay size={15}/></button><button title="Retry"><RotateCcw size={15}/></button></div>
+      <div className="task-actions"><button title="Pause" onClick={() => onPause(device.id)}><CirclePause size={15}/></button><button title="Resume" onClick={() => onResume(device.id)}><CirclePlay size={15}/></button><button title="Retry" onClick={() => onRetry(device.id)}><RotateCcw size={15}/></button></div>
     </section>
     <section className="inspector-section timeline">
       <div className="section-title"><span><ListTree size={14}/> AGENT TIMELINE</span><small>LIVE</small></div>

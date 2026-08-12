@@ -15,6 +15,8 @@ required_files=(
   "src/domain/streamManager.ts"
   "src/domain/taskScheduler.ts"
   "src/domain/workerPool.ts"
+  "src/domain/controlPlane.ts"
+  "src/domain/deviceDriver.ts"
   "src/domain/healthMonitor.ts"
   "src/domain/controlCenter.test.ts"
 )

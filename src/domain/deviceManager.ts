@@ -44,6 +44,7 @@ export class DeviceManager {
         stream,
         currentTask: task,
         taskQueue: [],
+        taskHistory: [],
         taskContext: task ? { step: 2, lastObservation: 'Home screen loaded', variables: {} } : { variables: {} },
         actionHistory: this.seedHistory(index, task),
         memory: { accountSlot: index + 1, locale: index % 3 === 0 ? 'en-US' : 'zh-CN' },
@@ -61,8 +62,8 @@ export class DeviceManager {
     const current = this.sessions.get(id);
     if (!current) return undefined;
     const next = updater(current);
-    this.sessions.set(id, next);
-    return next;
+    if (next !== current) Object.assign(current, next);
+    return current;
   }
 
   setOffline(id: string): void {
@@ -75,8 +76,14 @@ export class DeviceManager {
       agentStatus: 'ERROR',
       agentSession: { ...session.agentSession, status: 'ERROR', workerId: null },
       metrics: { ...session.metrics, fps: 0, network: 'OFFLINE' },
-      currentTask: session.currentTask ? { ...session.currentTask, status: 'DEVICE_OFFLINE', updatedAt: Date.now() } : null,
+      currentTask: session.currentTask ? this.markTaskOffline(session.currentTask) : null,
     }));
+  }
+
+  private markTaskOffline(task: TaskInstance): TaskInstance {
+    task.status = 'DEVICE_OFFLINE';
+    task.updatedAt = Date.now();
+    return task;
   }
 
   recover(id: string): void {
@@ -94,7 +101,7 @@ export class DeviceManager {
 
   private makeInitialTask(deviceId: string, index: number): TaskInstance {
     const now = Date.now();
-    return { id: `seed-task-${index}`, deviceId, goal: 'Verify account dashboard', status: 'RUNNING', priority: 1, attempts: 1, createdAt: now, updatedAt: now };
+    return { id: `seed-task-${index}`, deviceId, goal: 'Verify account dashboard', status: 'RUNNING', priority: 1, attempts: 0, createdAt: now, updatedAt: now };
   }
 
   private seedHistory(index: number, task: TaskInstance | null) {

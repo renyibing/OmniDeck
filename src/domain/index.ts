@@ -5,3 +5,5 @@ export * from './streamManager';
 export * from './taskScheduler';
 export * from './workerPool';
 export * from './healthMonitor';
+export * from './deviceDriver';
+export * from './controlPlane';
