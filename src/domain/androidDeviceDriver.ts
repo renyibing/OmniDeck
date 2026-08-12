@@ -1,11 +1,14 @@
 import type { DeviceHealth, StreamProfile } from './types';
-import type { DeviceDriverAdapter, ScreenshotRequest, ScreenshotResult } from './deviceDriver';
+import type { DeviceDriverAdapter, LongPressRequest, MonitorFrame, NormalizedPoint, ScreenshotRequest, ScreenshotResult, SwipeRequest } from './deviceDriver';
+import { parseUiAutomatorXml, type UiHierarchy } from './androidUiHierarchy';
 import { NativeToolError, ProcessRunner } from './nativeProcess';
+import { encodeRgbaPng } from './pngEncoder';
 
 export interface AndroidDriverOptions {
   serial: string;
   adbPath?: string;
   scrcpyPath?: string;
+  streamProcessEnabled?: boolean;
   runner?: ProcessRunner;
 }
 
@@ -18,6 +21,8 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
   private connected = false;
   private scrcpyProcess: ReturnType<ProcessRunner['spawn']> | null = null;
   private streamSignature = '';
+  private streamProfile: StreamProfile | null = null;
+  private displaySize: { width: number; height: number } | null = null;
 
   constructor(readonly deviceId: string, private readonly options: AndroidDriverOptions) {
     this.runner = options.runner ?? new ProcessRunner();
@@ -27,7 +32,7 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
 
   async connect(signal?: AbortSignal): Promise<void> {
     const result = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, 'get-state'], signal });
-    if (result.code !== 0 || result.stdout.trim() !== 'device') throw new NativeToolError(`Android device ${this.options.serial} is not authorized`, `${this.adbPath} -s ${this.options.serial} get-state`, result.stderr);
+    if (result.code !== 0 || result.stdout.trim() !== 'device') throw new NativeToolError(`Android device ${this.deviceId} (${this.options.serial}) is not authorized`, `${this.adbPath} -s ${this.options.serial} get-state`, result.stderr);
     this.connected = true;
   }
 
@@ -35,18 +40,99 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
     this.scrcpyProcess?.kill('SIGTERM');
     this.scrcpyProcess = null;
     this.streamSignature = '';
+    this.streamProfile = null;
+    this.displaySize = null;
     this.connected = false;
   }
 
   async screenshot(request: ScreenshotRequest, signal?: AbortSignal): Promise<ScreenshotResult> {
     this.requireConnected();
     const result = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, 'exec-out', 'screencap', '-p'], signal });
-    if (result.code !== 0) throw new NativeToolError(`Screenshot failed for ${this.deviceId}`, `${this.adbPath} -s ${this.options.serial} exec-out screencap -p`, result.stderr);
+    if (result.code !== 0) throw this.adbError('Screenshot failed', ['exec-out', 'screencap', '-p'], result.stderr);
     return { ...request, deviceId: this.deviceId, capturedAt: Date.now() };
   }
 
+  async monitorFrame(signal?: AbortSignal): Promise<MonitorFrame> {
+    this.requireConnected();
+    const result = await this.runner.runBinary({ command: this.adbPath, args: ['-s', this.options.serial, 'exec-out', 'screencap'], signal, timeoutMs: 8_000 });
+    if (result.code !== 0 || result.stdout.length < 16) throw this.adbError('Preview capture failed', ['exec-out', 'screencap'], result.stderr);
+    const width = result.stdout.readUInt32LE(0);
+    const height = result.stdout.readUInt32LE(4);
+    const pixelFormat = result.stdout.readUInt32LE(8);
+    const headerSize = 16;
+    const expectedBytes = width * height * 4;
+    if (pixelFormat !== 1 || result.stdout.length < headerSize + expectedBytes) throw this.adbError('Preview capture failed', ['exec-out', 'screencap'], result.stderr);
+    const maxDimension = this.streamProfile
+      ? Math.max(this.streamProfile.width, this.streamProfile.height)
+      : 720;
+    return {
+      deviceId: this.deviceId,
+      capturedAt: Date.now(),
+      contentType: 'image/png',
+      data: encodeRgbaPng(width, height, result.stdout.subarray(headerSize, headerSize + expectedBytes), maxDimension),
+    };
+  }
+
+  async getUiHierarchy(signal?: AbortSignal): Promise<UiHierarchy> {
+    this.requireConnected();
+    const primaryArgs = ['exec-out', 'uiautomator', 'dump', '/dev/tty'];
+    const primary = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, ...primaryArgs], signal, timeoutMs: 8_000 });
+    if (primary.code === 0) {
+      const hierarchy = parseUiAutomatorXml(primary.stdout, Date.now());
+      if (hierarchy.nodes.length) return hierarchy;
+    }
+
+    const fallbackPath = `/sdcard/omnideck-ui-${Date.now()}.xml`;
+    const dumpArgs = ['shell', 'uiautomator', 'dump', fallbackPath];
+    const dump = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, ...dumpArgs], signal, timeoutMs: 8_000 });
+    if (dump.code !== 0) throw this.adbError('UI hierarchy dump failed', primaryArgs, primary.stderr || primary.stdout || dump.stderr || dump.stdout);
+    const catArgs = ['exec-out', 'cat', fallbackPath];
+    const cat = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, ...catArgs], signal, timeoutMs: 8_000 });
+    void this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, 'shell', 'rm', '-f', fallbackPath], signal, timeoutMs: 5_000 }).catch(() => undefined);
+    if (cat.code !== 0) throw this.adbError('UI hierarchy readback failed', catArgs, cat.stderr || cat.stdout);
+    const hierarchy = parseUiAutomatorXml(cat.stdout, Date.now());
+    if (!hierarchy.nodes.length) throw this.adbError('UI hierarchy dump returned no nodes', catArgs, cat.stderr || cat.stdout || primary.stderr || primary.stdout);
+    return hierarchy;
+  }
+
+  async getScreenSize(signal?: AbortSignal): Promise<{ width: number; height: number }> {
+    const physicalSize = await this.getDisplaySize(signal);
+    const orientation = await this.readOrientation(signal);
+    return orientation % 2 === 0 ? physicalSize : { width: physicalSize.height, height: physicalSize.width };
+  }
+
+  async tap(point: NormalizedPoint, signal?: AbortSignal): Promise<void> {
+    this.requireConnected();
+    const { x, y } = await this.resolvePoint(point, signal);
+    await this.shell(['input', 'tap', String(x), String(y)], signal);
+  }
+
+  async swipe(request: SwipeRequest, signal?: AbortSignal): Promise<void> {
+    this.requireConnected();
+    const from = await this.resolvePoint(request.from, signal);
+    const to = await this.resolvePoint(request.to, signal);
+    const duration = Math.min(5_000, Math.max(0, Math.round(request.durationMs ?? 350)));
+    await this.shell(['input', 'swipe', String(from.x), String(from.y), String(to.x), String(to.y), String(duration)], signal);
+  }
+
+  async longPress(request: LongPressRequest, signal?: AbortSignal): Promise<void> {
+    this.requireConnected();
+    const point = await this.resolvePoint(request.point, signal);
+    const duration = Math.min(5_000, Math.max(350, Math.round(request.durationMs ?? 650)));
+    await this.shell(['input', 'swipe', String(point.x), String(point.y), String(point.x), String(point.y), String(duration)], signal);
+  }
+
+  async inputText(text: string, signal?: AbortSignal): Promise<void> {
+    this.requireConnected();
+    await this.shell(['input', 'text', encodeAdbInputText(text)], signal);
+  }
+
+  async back(signal?: AbortSignal): Promise<void> { await this.shell(['input', 'keyevent', 'KEYCODE_BACK'], signal); }
+  async home(signal?: AbortSignal): Promise<void> { await this.shell(['input', 'keyevent', 'KEYCODE_HOME'], signal); }
+
   async launchApp(appId: string, signal?: AbortSignal): Promise<void> { await this.shell(['monkey', '-p', appId, '1'], signal); }
   async restartApp(appId: string, signal?: AbortSignal): Promise<void> { await this.shell(['am', 'force-stop', appId], signal); await this.launchApp(appId, signal); }
+  async stopApp(appId: string, signal?: AbortSignal): Promise<void> { await this.shell(['am', 'force-stop', appId], signal); }
   async performGoalStep(_goal: string, signal?: AbortSignal): Promise<void> { this.requireConnected(); await this.screenshot({ purpose: 'AI', width: 1440, height: 2560 }, signal); }
 
   async health(signal?: AbortSignal): Promise<DeviceHealth> {
@@ -58,6 +144,9 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
 
   applyStreamProfile(profile: StreamProfile): void {
     this.requireConnected();
+    this.streamProfile = profile;
+    // Browser preview uses scrcpy-server H.264 via ScrcpyVideoRegistry; avoid spawning a desktop window.
+    if (this.options.streamProcessEnabled !== true) return;
     const signature = JSON.stringify(profile);
     if (this.scrcpyProcess && this.streamSignature === signature) return;
     this.scrcpyProcess?.kill('SIGTERM');
@@ -84,8 +173,46 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
   private async shell(args: string[], signal?: AbortSignal): Promise<void> {
     this.requireConnected();
     const result = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, 'shell', ...args], signal });
-    if (result.code !== 0) throw new NativeToolError(`ADB command failed for ${this.deviceId}`, `${this.adbPath} -s ${this.options.serial} shell ${args.join(' ')}`, result.stderr);
+    if (result.code !== 0) throw this.adbError('ADB shell command failed', ['shell', ...args], result.stderr);
   }
 
-  private requireConnected(): void { if (!this.connected) throw new NativeToolError(`Android device ${this.options.serial} is not connected`, 'adb'); }
+  private async resolvePoint(point: NormalizedPoint, signal?: AbortSignal): Promise<{ x: number; y: number }> {
+    const { width, height } = await this.getScreenSize(signal);
+    const normalizedX = Math.min(1, Math.max(0, point.x));
+    const normalizedY = Math.min(1, Math.max(0, point.y));
+    return {
+      x: Math.round(normalizedX * Math.max(1, width - 1)),
+      y: Math.round(normalizedY * Math.max(1, height - 1)),
+    };
+  }
+
+  private async readOrientation(signal?: AbortSignal): Promise<number> {
+    const result = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, 'shell', 'dumpsys', 'input'], signal, timeoutMs: 5_000 });
+    if (result.code !== 0) throw this.adbError('Unable to read display orientation', ['shell', 'dumpsys', 'input'], result.stderr);
+    return Number(result.stdout.match(/SurfaceOrientation[:=]\s*(\d)/)?.[1] ?? 0);
+  }
+
+  private async getDisplaySize(signal?: AbortSignal): Promise<{ width: number; height: number }> {
+    if (this.displaySize) return this.displaySize;
+    const result = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, 'shell', 'wm', 'size'], signal, timeoutMs: 5_000 });
+    if (result.code !== 0) throw this.adbError('Unable to read display size', ['shell', 'wm', 'size'], result.stderr);
+    const match = result.stdout.match(/(\d+)\s*x\s*(\d+)/g)?.at(-1)?.match(/(\d+)\s*x\s*(\d+)/);
+    if (!match) throw this.adbError('Unable to parse display size', ['shell', 'wm', 'size'], result.stdout);
+    this.displaySize = { width: Number(match[1]), height: Number(match[2]) };
+    return this.displaySize;
+  }
+
+  private adbError(message: string, args: string[], stderr: string): NativeToolError {
+    return new NativeToolError(`${message} for ${this.deviceId} (${this.options.serial})`, `${this.adbPath} -s ${this.options.serial} ${args.join(' ')}`, stderr);
+  }
+
+  private requireConnected(): void { if (!this.connected) throw new NativeToolError(`Android device ${this.deviceId} (${this.options.serial}) is not connected`, `${this.adbPath} -s ${this.options.serial}`); }
+}
+
+export function encodeAdbInputText(text: string): string {
+  return text
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/\s/g, '%s')
+    .replace(/([&<>;|()*~"'`$])/g, '\\$1');
 }

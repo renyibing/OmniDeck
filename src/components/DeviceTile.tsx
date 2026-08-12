@@ -1,30 +1,39 @@
-import { BatteryMedium, Bot, Check, Cpu, Radio, Thermometer, Wifi, WifiOff } from 'lucide-react';
+import { BatteryMedium, Bot, Check, Cpu, GripVertical, Radio, Thermometer, Wifi, WifiOff } from 'lucide-react';
 import type { DeviceSummaryDTO } from '../server/protocol';
+import { DeviceScreen } from './DeviceScreen';
+import type { ScreenTapPoint } from '../app/controlCenterClient';
 
-interface Props { device: DeviceSummaryDTO; selected: boolean; focused: boolean; dense: boolean; onSelect: (event: React.MouseEvent) => void; onToggle: () => void; onOpen: () => void }
+interface Props {
+  device: DeviceSummaryDTO;
+  selected: boolean;
+  focused: boolean;
+  dense: boolean;
+  dragging: boolean;
+  dropTarget: boolean;
+  onSelect: (event: React.MouseEvent) => void;
+  onToggle: () => void;
+  onOpen: () => void;
+  onTap: (point: ScreenTapPoint) => void;
+  onDragStart: (event: React.DragEvent) => void;
+  onDragOver: (event: React.DragEvent) => void;
+  onDrop: (event: React.DragEvent) => void;
+  onDragEnd: () => void;
+}
 
 const agentLabel: Record<DeviceSummaryDTO['agentStatus'], string> = { IDLE: 'IDLE', WAITING: 'WAITING', RUNNING: 'AI RUNNING', PAUSED: 'PAUSED', HUMAN_CONTROL: 'HUMAN', ERROR: 'ERROR' };
 
-export function DeviceTile({ device, selected, focused, dense, onSelect, onToggle, onOpen }: Props) {
+export function DeviceTile({ device, selected, focused, dense, dragging, dropTarget, onSelect, onToggle, onOpen, onTap, onDragStart, onDragOver, onDrop, onDragEnd }: Props) {
   const stateClass = device.status === 'OFFLINE' ? 'offline' : device.agentStatus === 'RUNNING' ? 'running' : device.agentStatus === 'HUMAN_CONTROL' ? 'human' : device.status === 'ERROR' || device.health === 'DEGRADED' ? 'error' : 'idle';
-  return <article className={`device-tile ${stateClass} ${selected ? 'selected' : ''} ${focused ? 'focused' : ''} ${dense ? 'dense' : ''}`} onClick={onSelect} onDoubleClick={onOpen}>
+  return <article className={`device-tile ${stateClass} ${selected ? 'selected' : ''} ${focused ? 'focused' : ''} ${dense ? 'dense' : ''} ${dragging ? 'dragging' : ''} ${dropTarget ? 'drop-target' : ''}`} onClick={onSelect} onDoubleClick={onOpen} onDragOver={onDragOver} onDrop={onDrop}>
     <div className="tile-topline">
+      <button className="drag-handle" aria-label={`Reorder ${device.name}`} title="Drag to reorder" draggable onDragStart={onDragStart} onDragEnd={onDragEnd} onClick={event => event.stopPropagation()}><GripVertical size={12}/></button>
       <button className={`tile-check ${selected ? 'checked' : ''}`} aria-label={`Select ${device.name}`} onClick={event => { event.stopPropagation(); onToggle(); }}>{selected && <Check size={12}/>}</button>
       <div className="device-title"><strong>{device.name}</strong><span>{device.id.toUpperCase()}</span></div>
       <span className={`platform ${device.platform.toLowerCase()}`}>{device.platform}</span>
       <span className={`online-state ${device.status.toLowerCase()}`}><i/>{device.status}</span>
     </div>
     <div className="screen-frame">
-      <div className={`sim-screen screen-${device.screenshotSeed}`}>
-        <div className="phone-status"><span>9:41</span><span><Radio size={9}/><Wifi size={9}/><BatteryMedium size={10}/></span></div>
-        <div className="screen-content">
-          <span className="app-eyebrow">{device.currentApp}</span>
-          <strong>{device.screenshotSeed % 3 === 0 ? 'Overview' : device.screenshotSeed % 3 === 1 ? 'Activity' : 'Workspace'}</strong>
-          <div className="screen-visual"><i/><i/><i/></div>
-          <div className="screen-lines"><i/><i/><i/></div>
-        </div>
-        {device.status === 'OFFLINE' && <div className="screen-offline"><WifiOff size={24}/><strong>Signal lost</strong><span>Reconnecting session</span></div>}
-      </div>
+      <DeviceScreen device={device} fallback="tile" canControl={device.agentStatus === 'HUMAN_CONTROL'} onTap={onTap}/>
       <div className="stream-badge">{device.stream.width}p · {device.stream.fps} FPS</div>
       <div className={`agent-badge ${device.agentStatus.toLowerCase()}`}><Bot size={12}/>{agentLabel[device.agentStatus]}</div>
     </div>

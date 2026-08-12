@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LAYOUTS, type DeviceGroup, type LayoutSize, type WorkspacePreset } from '../domain';
-import type { DeviceConfigurationDTO, DeviceDetailDTO, DeviceSummaryDTO, DiscoveredDeviceDTO, EventEnvelope, RuntimeSnapshot } from '../server/protocol';
-import { ControlCenterClient, type ConnectionState, type DeviceAction } from './controlCenterClient';
+import type { DeviceConfigurationDTO, DeviceDetailDTO, DeviceSummaryDTO, DiscoveredDeviceDTO, EventEnvelope, IOSWdaStatusDTO, RuntimeSnapshot, UiHierarchyDTO } from '../server/protocol';
+import { ControlCenterClient, type ConnectionState, type DeviceAction, type ScreenTapPoint } from './controlCenterClient';
+import { reorderDeviceIds, sortDevicesForWall } from './deviceOrdering';
 
 function readJSON<T>(key: string, fallback: T): T {
   try { return JSON.parse(localStorage.getItem(key) ?? '') as T; } catch { return fallback; }
@@ -30,6 +31,7 @@ export function useControlCenter() {
     const stored = Number(localStorage.getItem('omnideck.layout'));
     return LAYOUTS.includes(stored as LayoutSize) ? stored as LayoutSize : 16;
   });
+  const [manualDeviceOrder, setManualDeviceOrder] = useState<string[]>(() => readJSON('omnideck.device-order', []));
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(['device-01']));
   const [focusedId, setFocusedId] = useState<string | null>('device-01');
   const [fullscreenId, setFullscreenId] = useState<string | null>(null);
@@ -37,6 +39,9 @@ export function useControlCenter() {
   const [lastAnchor, setLastAnchor] = useState<string | null>('device-01');
   const [toast, setToast] = useState<string | null>(null);
   const [discoveredDevices, setDiscoveredDevices] = useState<DiscoveredDeviceDTO[]>([]);
+  const [wdaStatuses, setWdaStatuses] = useState<Record<string, IOSWdaStatusDTO>>({});
+  const [uiTree, setUiTree] = useState<{ deviceId: string; tree: UiHierarchyDTO } | null>(null);
+  const [uiTreeLoading, setUiTreeLoading] = useState(false);
   const [connectionPanelOpen, setConnectionPanelOpen] = useState(false);
   const [discoveryState, setDiscoveryState] = useState<'idle' | 'detecting' | 'ready' | 'failed'>('idle');
   const [workspaceName, setWorkspaceName] = useState('');
@@ -48,11 +53,20 @@ export function useControlCenter() {
   const activeGroup = groups.find(group => group.id === groupId) ?? groups[0];
   const activeWorkspace = workspaces.find(workspace => workspace.id === activeWorkspaceId) ?? null;
   const activeDeviceIds = activeWorkspace?.deviceIds ?? activeGroup?.deviceIds ?? [];
-  const groupDevices = devices.filter(device => activeDeviceIds.includes(device.id));
-  const visibleDevices = groupDevices.slice(0, layout);
+  const orderedGroupDevices = useMemo(
+    () => sortDevicesForWall(devices, activeDeviceIds, manualDeviceOrder),
+    [devices, activeDeviceIds, manualDeviceOrder],
+  );
+  const visibleDevices = orderedGroupDevices.slice(0, layout);
   const visibleDeviceKey = visibleDevices.map(device => device.id).join(',');
   const selectedSummary = devices.find(device => device.id === selectedId) ?? null;
   const selectedDevice = selectedSummary && detail?.id === selectedSummary.id ? { ...selectedSummary, ...detail } : selectedSummary;
+
+  const refreshWdaStatus = useCallback((deviceId: string) => {
+    void client.getWdaStatus(deviceId).then(status => {
+      setWdaStatuses(current => ({ ...current, [deviceId]: status }));
+    }).catch(error => setToast(error instanceof Error ? error.message : 'WDA status unavailable'));
+  }, [client]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -97,6 +111,17 @@ export function useControlCenter() {
     return () => controller.abort();
   }, [client, selectedId, detailVersion]);
 
+  useEffect(() => { setUiTree(null); }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedSummary || selectedSummary.platform !== 'IOS') return;
+    const controller = new AbortController();
+    void client.getWdaStatus(selectedSummary.id, controller.signal).then(status => {
+      setWdaStatuses(current => ({ ...current, [selectedSummary.id]: status }));
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, [client, selectedSummary?.id, selectedSummary?.connection.state, selectedSummary?.configuration?.wdaUrl]);
+
   useEffect(() => {
     if (!runtime || !activeGroup) return;
     const command = { commandId: crypto.randomUUID(), timestamp: Date.now(), layout, focusedId, fullscreenId, visibleDeviceIds: visibleDevices.map(device => device.id), targetDeviceIds: devices.map(device => device.id) } as const;
@@ -121,8 +146,44 @@ export function useControlCenter() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    localStorage.setItem('omnideck.device-order', JSON.stringify(manualDeviceOrder));
+  }, [manualDeviceOrder]);
+
   const sendAction = useCallback((id: string, action: DeviceAction, appId?: string) => {
     void client.deviceAction(id, action, crypto.randomUUID(), appId).catch(error => setToast(error instanceof Error ? error.message : `${action} failed`));
+  }, [client]);
+
+  const tapDevice = useCallback((id: string, point: ScreenTapPoint, source: 'LIVE_PREVIEW' | 'FULLSCREEN_PREVIEW' = 'LIVE_PREVIEW') => {
+    void client.tapDevice(id, point, source).catch(error => setToast(error instanceof Error ? error.message : 'Screen input failed'));
+  }, [client]);
+
+  const runManualCommand = useCallback((id: string, command: () => Promise<void>, fallback: string) => {
+    void command().then(() => setDetailVersion(version => version + 1)).catch(error => setToast(error instanceof Error ? error.message : fallback));
+  }, []);
+
+  const manualBack = useCallback((id: string) => runManualCommand(id, () => client.backDevice(id), 'Back failed'), [client, runManualCommand]);
+  const manualHome = useCallback((id: string) => runManualCommand(id, () => client.homeDevice(id), 'Home failed'), [client, runManualCommand]);
+  const manualInputText = useCallback((id: string, text: string) => runManualCommand(id, () => client.inputTextDevice(id, text), 'Text input failed'), [client, runManualCommand]);
+  const manualLongPress = useCallback((id: string, point: ScreenTapPoint = { x: 0.5, y: 0.5 }) => runManualCommand(id, () => client.longPressDevice(id, point), 'Long press failed'), [client, runManualCommand]);
+  const manualStopApp = useCallback((id: string) => {
+    const appId = devices.find(device => device.id === id)?.currentApp ?? 'Omni Market';
+    runManualCommand(id, () => client.stopAppDevice(id, appId), 'Stop app failed');
+  }, [client, devices, runManualCommand]);
+  const manualSwipe = useCallback((id: string, direction: 'UP' | 'DOWN') => {
+    const input = direction === 'UP'
+      ? { from: { x: 0.5, y: 0.78 }, to: { x: 0.5, y: 0.28 }, durationMs: 360 }
+      : { from: { x: 0.5, y: 0.28 }, to: { x: 0.5, y: 0.78 }, durationMs: 360 };
+    runManualCommand(id, () => client.swipeDevice(id, input), `Swipe ${direction.toLowerCase()} failed`);
+  }, [client, runManualCommand]);
+
+  const refreshUiTree = useCallback((id: string) => {
+    setUiTreeLoading(true);
+    void client.getUiTree(id).then(tree => {
+      setUiTree({ deviceId: id, tree });
+      setDetailVersion(version => version + 1);
+    }).catch(error => setToast(error instanceof Error ? error.message : 'UI tree unavailable'))
+      .finally(() => setUiTreeLoading(false));
   }, [client]);
 
   const discoverDevices = useCallback(() => {
@@ -130,29 +191,48 @@ export function useControlCenter() {
     void client.discoverDevices().then(found => {
       setDiscoveredDevices(found);
       setDiscoveryState('ready');
+      found.filter(device => device.platform === 'IOS').forEach(device => refreshWdaStatus(device.deviceId));
     }).catch(error => {
       setDiscoveryState('failed');
       setToast(error instanceof Error ? error.message : 'Device discovery failed');
     });
-  }, [client]);
+  }, [client, refreshWdaStatus]);
 
   const configureDevice = useCallback((configuration: DeviceConfigurationDTO) => {
     void client.configureDevice(configuration).then(snapshot => {
       setDevices(current => current.map(device => device.id === snapshot.id ? snapshot : device));
       setFocusedId(snapshot.id);
       setSelectedIds(new Set([snapshot.id]));
+      if (snapshot.platform === 'IOS') refreshWdaStatus(snapshot.id);
       setToast(`${snapshot.name} configuration saved`);
     }).catch(error => setToast(error instanceof Error ? error.message : 'Device configuration failed'));
-  }, [client]);
+  }, [client, refreshWdaStatus]);
 
   const connectDevice = useCallback((id: string) => {
-    void client.connectDevice(id).then(snapshot => {
+    const summary = devices.find(device => device.id === id);
+    void (async () => {
+      if (summary?.platform === 'IOS') {
+        const readiness = await client.getWdaStatus(id);
+        setWdaStatuses(current => ({ ...current, [id]: readiness }));
+        if (!isWdaConnectable(readiness)) {
+          setToast(`${readiness.state}: ${readiness.lastError ?? readiness.nextAction}`);
+          return;
+        }
+      }
+      return client.connectDevice(id);
+    })().then(snapshot => {
+      if (!snapshot) return;
       setDevices(current => current.map(device => device.id === snapshot.id ? snapshot : device));
       setFocusedId(snapshot.id);
       setSelectedIds(new Set([snapshot.id]));
+      if (snapshot.platform === 'IOS') refreshWdaStatus(snapshot.id);
       setToast(`${snapshot.name} connected`);
     }).catch(error => setToast(error instanceof Error ? error.message : 'Device connection failed'));
-  }, [client]);
+  }, [client, devices, refreshWdaStatus]);
+
+  const reorderVisibleDevices = useCallback((sourceId: string, targetId: string) => {
+    setManualDeviceOrder(current => reorderDeviceIds(current, sourceId, targetId, visibleDevices.map(device => device.id)));
+  }, [visibleDeviceKey]);
 
   const setGroupId = (nextId: string) => {
     const next = groups.find(group => group.id === nextId) ?? groups[0];
@@ -249,8 +329,14 @@ export function useControlCenter() {
     selectedDevice, stats, workerSnapshot: runtime?.workers ?? { active: 0, queued: 0, completed: 0 }, connection, workspaceName, toast,
     setLayout: setLayoutState, setGroupId, setWorkspace, selectDevice, toggleCheckbox, selectAll, clearSelection, closeInspector,
     setFullscreenId, setWallOnly, runBatch, applyBatchAction, toggleOffline, takeHumanControl: (id: string) => sendAction(id, 'take-control'),
+    releaseHumanControl: (id: string) => sendAction(id, 'release-control'),
     pauseDevice: (id: string) => sendAction(id, 'pause'), resumeDevice: (id: string) => sendAction(id, 'resume'), retryDevice: (id: string) => sendAction(id, 'retry'),
     setWorkspaceName, saveWorkspace, createCustomGroup, discoveredDevices, connectionPanelOpen, setConnectionPanelOpen,
-    discoveryState, discoverDevices, configureDevice, connectDevice,
+    discoveryState, discoverDevices, configureDevice, connectDevice, tapDevice, reorderVisibleDevices, wdaStatuses, refreshWdaStatus,
+    manualBack, manualHome, manualInputText, manualLongPress, manualSwipe, manualStopApp, refreshUiTree, uiTree: uiTree?.deviceId === selectedId ? uiTree.tree : null, uiTreeLoading,
   };
+}
+
+function isWdaConnectable(status: IOSWdaStatusDTO): boolean {
+  return status.state === 'WDA_READY' || status.state === 'SESSION_CONNECTED';
 }

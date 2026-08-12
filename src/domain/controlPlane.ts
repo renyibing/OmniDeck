@@ -1,9 +1,10 @@
 import { DeviceManager } from './deviceManager';
-import type { DeviceDriverAdapter } from './deviceDriver';
+import type { DeviceDriverAdapter, LongPressRequest, NormalizedPoint, SwipeRequest } from './deviceDriver';
 import { DriverRegistry } from './deviceDriver';
 import { StreamManager } from './streamManager';
 import { TaskScheduler } from './taskScheduler';
 import type { DeviceSession, Platform, TaskInstance, TaskStatus, TimelineEvent } from './types';
+import type { UiHierarchy } from './androidUiHierarchy';
 import type { ResourceKind } from './workerPool';
 
 type ControlPlaneListener = () => void;
@@ -15,6 +16,7 @@ export interface ControlPlaneOptions {
 export class ControlPlane {
   private readonly tasks = new Map<string, TaskInstance>();
   private readonly controllers = new Map<string, AbortController>();
+  private readonly deviceControllers = new Map<string, Set<AbortController>>();
   private readonly listeners = new Set<ControlPlaneListener>();
   private readonly streamManager = new StreamManager();
   private readonly autoExecute: boolean;
@@ -163,20 +165,60 @@ export class ControlPlane {
   }
 
   async restartApp(deviceId: string): Promise<void> {
-    await this.runDriverCommand(deviceId, driver => driver.restartApp(this.devices.get(deviceId)?.currentApp ?? ''));
+    await this.runDriverCommand(deviceId, (driver, signal) => driver.restartApp(this.devices.get(deviceId)?.currentApp ?? '', signal));
     const session = this.devices.get(deviceId);
     if (session) this.record(session, 'ACTION', `Restarted ${session.currentApp}`);
     this.emit();
   }
 
   async launchApp(deviceId: string, appId = 'Omni Market'): Promise<void> {
-    await this.runDriverCommand(deviceId, driver => driver.launchApp(appId));
+    await this.runDriverCommand(deviceId, (driver, signal) => driver.launchApp(appId, signal));
     const session = this.devices.get(deviceId);
     if (session) {
       session.currentApp = appId;
       this.record(session, 'ACTION', `Launched ${appId}`);
     }
     this.emit();
+  }
+
+  async tapDevice(deviceId: string, point: NormalizedPoint, source: 'LIVE_PREVIEW' | 'FULLSCREEN_PREVIEW' = 'LIVE_PREVIEW'): Promise<void> {
+    await this.runManualAction(deviceId, 'tap', `x=${percent(point.x)} y=${percent(point.y)}`, source, (driver, signal) => driver.tap(point, signal));
+  }
+
+  async swipeDevice(deviceId: string, request: SwipeRequest, source = 'INSPECTOR'): Promise<void> {
+    await this.runManualAction(deviceId, 'swipe', `from=${percent(request.from.x)},${percent(request.from.y)} to=${percent(request.to.x)},${percent(request.to.y)} durationMs=${request.durationMs ?? 350}`, source, (driver, signal) => driver.swipe(request, signal));
+  }
+
+  async longPressDevice(deviceId: string, request: LongPressRequest, source = 'INSPECTOR'): Promise<void> {
+    await this.runManualAction(deviceId, 'long_press', `x=${percent(request.point.x)} y=${percent(request.point.y)} durationMs=${request.durationMs ?? 650}`, source, (driver, signal) => driver.longPress(request, signal));
+  }
+
+  async inputTextDevice(deviceId: string, text: string, source = 'INSPECTOR'): Promise<void> {
+    await this.runManualAction(deviceId, 'input_text', `redactedLength=${text.length}`, source, (driver, signal) => driver.inputText(text, signal));
+  }
+
+  async backDevice(deviceId: string, source = 'INSPECTOR'): Promise<void> {
+    await this.runManualAction(deviceId, 'back', 'key=BACK', source, (driver, signal) => driver.back(signal));
+  }
+
+  async homeDevice(deviceId: string, source = 'INSPECTOR'): Promise<void> {
+    await this.runManualAction(deviceId, 'home', 'key=HOME', source, (driver, signal) => driver.home(signal));
+  }
+
+  async stopAppDevice(deviceId: string, appId?: string, source = 'INSPECTOR'): Promise<void> {
+    const targetApp = appId ?? this.devices.get(deviceId)?.currentApp ?? '';
+    await this.runManualAction(deviceId, 'stop_app', `app=${targetApp}`, source, (driver, signal) => driver.stopApp(targetApp, signal));
+  }
+
+  async getUiHierarchy(deviceId: string): Promise<UiHierarchy> {
+    const started = Date.now();
+    const hierarchy = await this.readDriverData(deviceId, (driver, signal) => driver.getUiHierarchy(signal));
+    const session = this.devices.get(deviceId);
+    if (session) {
+      this.record(session, 'OBSERVE', `Read UI hierarchy nodes=${hierarchy.nodes.length} source=SELECTED_DETAIL durationMs=${Date.now() - started} result=SUCCESS`);
+      this.emit();
+    }
+    return hierarchy;
   }
 
   takeHumanControl(deviceId: string): void {
@@ -208,6 +250,7 @@ export class ControlPlane {
   async setOffline(deviceId: string): Promise<void> {
     const session = this.devices.get(deviceId);
     if (!session) return;
+    this.abortDeviceCommands(deviceId, 'Device offline');
     if (session.currentTask) {
       this.abort(session.currentTask.id, 'Device offline');
       const promoted = this.scheduler.workers.release(session.currentTask.id);
@@ -318,7 +361,9 @@ export class ControlPlane {
       await driver.performGoalStep(task.goal, controller.signal);
       this.record(session, 'ACTION', 'Executed a device-scoped goal step');
       session.taskContext.step = 2;
+      await this.verifyTaskAction(session, driver, controller.signal);
       await driver.screenshot({ purpose: 'AI', width: capture.width, height: capture.height }, controller.signal);
+      this.record(session, 'OBSERVE', 'Captured post-action verification screenshot');
       await this.completeTask(task.id, 'SUCCESS');
     } catch (error) {
       const reason = controller.signal.aborted ? controller.signal.reason : error;
@@ -340,12 +385,69 @@ export class ControlPlane {
     }
   }
 
-  private async runDriverCommand(deviceId: string, command: (driver: DeviceDriverAdapter) => Promise<void>): Promise<void> {
+  private async runDriverCommand(deviceId: string, command: (driver: DeviceDriverAdapter, signal: AbortSignal) => Promise<void>): Promise<void> {
+    await this.readDriverData(deviceId, command);
+  }
+
+  private async readDriverData<T>(deviceId: string, command: (driver: DeviceDriverAdapter, signal: AbortSignal) => Promise<T>): Promise<T> {
     const session = this.devices.get(deviceId);
     if (!session || session.status !== 'ONLINE') throw new Error(`Device ${deviceId} is offline`);
     const resource = this.platformResource(session.platform);
     if (!this.scheduler.resources.acquire(resource)) throw new Error(`${resource} concurrency limit reached`);
-    try { await command(this.drivers.get(deviceId)); } finally { this.scheduler.resources.release(resource); }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error('Device command timeout')), this.scheduler.config.timeoutMs);
+    this.trackDeviceCommand(deviceId, controller);
+    try { return await command(this.drivers.get(deviceId), controller.signal); } finally {
+      clearTimeout(timeout);
+      this.untrackDeviceCommand(deviceId, controller);
+      this.scheduler.resources.release(resource);
+    }
+  }
+
+  private async runManualAction(deviceId: string, action: string, target: string, source: string, command: (driver: DeviceDriverAdapter, signal: AbortSignal) => Promise<void>): Promise<void> {
+    const session = this.requireManualControl(deviceId);
+    const started = Date.now();
+    try {
+      await this.runDriverCommand(deviceId, command);
+      this.record(session, 'ACTION', `action=${action} target=${target} source=${source} durationMs=${Date.now() - started} result=SUCCESS`);
+      await this.verifyAfterAction(session, action);
+      this.emit();
+    } catch (error) {
+      const message = describeDriverError(error);
+      this.record(session, 'ACTION', `action=${action} target=${target} source=${source} durationMs=${Date.now() - started} result=ERROR error=${message}`);
+      this.emit();
+      throw error;
+    }
+  }
+
+  private requireManualControl(deviceId: string): DeviceSession {
+    const session = this.devices.get(deviceId);
+    if (!session || session.status !== 'ONLINE') throw new Error(`Device ${deviceId} is offline`);
+    if (session.agentStatus !== 'HUMAN_CONTROL') throw new Error(`Take human control of ${deviceId} before sending screen input`);
+    return session;
+  }
+
+  private async verifyAfterAction(session: DeviceSession, action: string): Promise<void> {
+    if (session.platform !== 'ANDROID') return;
+    const started = Date.now();
+    try {
+      const hierarchy = await this.readDriverData(session.id, (driver, signal) => driver.getUiHierarchy(signal));
+      this.record(session, 'OBSERVE', `action=${action} verification=UI_HIERARCHY_AFTER_ACTION nodes=${hierarchy.nodes.length} durationMs=${Date.now() - started} result=SUCCESS`);
+    } catch (error) {
+      this.record(session, 'OBSERVE', `action=${action} verification=UI_HIERARCHY_AFTER_ACTION durationMs=${Date.now() - started} result=ERROR error=${describeDriverError(error)}`);
+    }
+  }
+
+  private async verifyTaskAction(session: DeviceSession, driver: DeviceDriverAdapter, signal: AbortSignal): Promise<void> {
+    if (session.platform !== 'ANDROID') return;
+    const started = Date.now();
+    try {
+      const hierarchy = await driver.getUiHierarchy(signal);
+      session.taskContext.lastObservation = `UI hierarchy nodes=${hierarchy.nodes.length}`;
+      this.record(session, 'OBSERVE', `taskAction=goal_step verification=UI_HIERARCHY_AFTER_ACTION nodes=${hierarchy.nodes.length} durationMs=${Date.now() - started} result=SUCCESS`);
+    } catch (error) {
+      this.record(session, 'OBSERVE', `taskAction=goal_step verification=UI_HIERARCHY_AFTER_ACTION durationMs=${Date.now() - started} result=ERROR error=${describeDriverError(error)}`);
+    }
   }
 
   private platformResource(platform: Platform): ResourceKind { return platform === 'ANDROID' ? 'ADB' : 'IOS'; }
@@ -354,10 +456,62 @@ export class ControlPlane {
     this.controllers.get(taskId)?.abort(new Error(reason));
   }
 
+  private trackDeviceCommand(deviceId: string, controller: AbortController): void {
+    const controllers = this.deviceControllers.get(deviceId) ?? new Set<AbortController>();
+    controllers.add(controller);
+    this.deviceControllers.set(deviceId, controllers);
+  }
+
+  private untrackDeviceCommand(deviceId: string, controller: AbortController): void {
+    const controllers = this.deviceControllers.get(deviceId);
+    if (!controllers) return;
+    controllers.delete(controller);
+    if (!controllers.size) this.deviceControllers.delete(deviceId);
+  }
+
+  private abortDeviceCommands(deviceId: string, reason: string): void {
+    this.deviceControllers.get(deviceId)?.forEach(controller => controller.abort(new Error(reason)));
+  }
+
   private record(session: DeviceSession, kind: TimelineEvent['kind'], message: string): void {
     session.actionHistory.push({ id: `${session.id}-${Date.now()}-${session.actionHistory.length}`, time: new Date().toLocaleTimeString([], { hour12: false }), kind, message });
     if (session.actionHistory.length > 100) session.actionHistory.splice(0, session.actionHistory.length - 100);
+    session.screenshotSeed = (session.screenshotSeed + 1) % 8;
   }
 
   private emit(): void { this.listeners.forEach(listener => listener()); }
+}
+
+function percent(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+export function describeDriverError(error: unknown): string {
+  const nativeError = nativeToolErrorLike(error);
+  if (nativeError) {
+    const command = redactSensitiveCommand(nativeError.command);
+    const stderr = redactSensitiveText(nativeError.stderr.trim());
+    return [nativeError.message, command ? `command=${command}` : null, stderr ? `stderr=${stderr}` : null].filter(Boolean).join(' ');
+  }
+  return error instanceof Error ? error.message : 'Unknown error';
+}
+
+function nativeToolErrorLike(error: unknown): { message: string; command: string; stderr: string } | null {
+  if (!error || typeof error !== 'object') return null;
+  const candidate = error as { message?: unknown; command?: unknown; stderr?: unknown };
+  if (typeof candidate.command !== 'string') return null;
+  return {
+    message: typeof candidate.message === 'string' ? candidate.message : 'Native tool failed',
+    command: candidate.command,
+    stderr: typeof candidate.stderr === 'string' ? candidate.stderr : '',
+  };
+}
+
+export function redactSensitiveCommand(command: string): string {
+  return command.replace(/(\bshell\s+input\s+text\s+).+$/u, '$1[REDACTED_TEXT]');
+}
+
+function redactSensitiveText(value: string): string {
+  if (!value) return '';
+  return value.replace(/(\binput\s+text\s+).+$/u, '$1[REDACTED_TEXT]').slice(0, 500);
 }

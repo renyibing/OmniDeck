@@ -1,6 +1,5 @@
 export * from './types';
 export * from './deviceManager';
-export * from './deviceDiscovery';
 export * from './sessionManager';
 export * from './streamManager';
 export * from './taskScheduler';
@@ -8,3 +7,5 @@ export * from './workerPool';
 export * from './healthMonitor';
 export * from './deviceDriver';
 export * from './controlPlane';
+export * from './androidUiHierarchy';
+export * from './previewBroadcast';

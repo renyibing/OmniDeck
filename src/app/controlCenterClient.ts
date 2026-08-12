@@ -1,7 +1,9 @@
-import { eventEnvelopeSchema, type DeviceConfigurationDTO, type DeviceDetailDTO, type DeviceSummaryDTO, type DiscoveredDeviceDTO, type EventEnvelope, type RuntimeSnapshot, type StreamPolicyCommand, type BatchTaskCommand } from '../server/protocol';
+import { eventEnvelopeSchema, type DeviceConfigurationDTO, type DeviceDetailDTO, type DeviceSummaryDTO, type DiscoveredDeviceDTO, type EventEnvelope, type RuntimeSnapshot, type StreamPolicyCommand, type BatchTaskCommand, type IOSWdaStatusDTO, type UiHierarchyDTO } from '../server/protocol';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
-export type DeviceAction = 'pause' | 'resume' | 'stop' | 'retry' | 'take-control' | 'release-control' | 'disconnect' | 'recover' | 'restart-app' | 'launch-app';
+export type DeviceAction = 'pause' | 'resume' | 'stop' | 'retry' | 'take-control' | 'release-control' | 'disconnect' | 'recover' | 'restart-app' | 'launch-app' | 'stop-app';
+export interface ScreenTapPoint { x: number; y: number; }
+export interface SwipeCommandInput { from: ScreenTapPoint; to: ScreenTapPoint; durationMs?: number; }
 
 type RuntimeResponse = RuntimeSnapshot;
 type EventHandler = (event: EventEnvelope) => void;
@@ -27,6 +29,16 @@ export class ControlCenterClient {
   async getDeviceDetail(deviceId: string, signal?: AbortSignal): Promise<DeviceDetailDTO> {
     const result = await this.request<{ device: DeviceDetailDTO }>(`/devices/${encodeURIComponent(deviceId)}`, { signal });
     return result.device;
+  }
+
+  async getWdaStatus(deviceId: string, signal?: AbortSignal): Promise<IOSWdaStatusDTO> {
+    const result = await this.request<{ wdaStatus: IOSWdaStatusDTO }>(`/devices/${encodeURIComponent(deviceId)}/wda-status`, { signal });
+    return result.wdaStatus;
+  }
+
+  async getUiTree(deviceId: string, signal?: AbortSignal): Promise<UiHierarchyDTO> {
+    const result = await this.request<{ uiTree: UiHierarchyDTO }>(`/devices/${encodeURIComponent(deviceId)}/ui-tree`, { signal });
+    return result.uiTree;
   }
 
   async discoverDevices(signal?: AbortSignal): Promise<DiscoveredDeviceDTO[]> {
@@ -57,8 +69,48 @@ export class ControlCenterClient {
   async deviceAction(deviceId: string, action: DeviceAction, commandId = crypto.randomUUID(), appId?: string): Promise<void> {
     await this.request(`/devices/${encodeURIComponent(deviceId)}/${action}`, {
       method: 'POST',
-      body: { commandId, deviceId, timestamp: Date.now(), ...(action === 'launch-app' ? { appId: appId ?? 'Omni Market' } : {}) },
+      body: { commandId, deviceId, timestamp: Date.now(), ...(action === 'launch-app' || action === 'stop-app' ? { appId: appId ?? 'Omni Market' } : {}) },
     });
+  }
+
+  async stopAppDevice(deviceId: string, appId: string, commandId = crypto.randomUUID()): Promise<void> {
+    await this.deviceAction(deviceId, 'stop-app', commandId, appId);
+  }
+
+  async tapDevice(deviceId: string, point: ScreenTapPoint, source: 'LIVE_PREVIEW' | 'FULLSCREEN_PREVIEW' = 'LIVE_PREVIEW', commandId = crypto.randomUUID()): Promise<void> {
+    await this.request(`/devices/${encodeURIComponent(deviceId)}/tap`, {
+      method: 'POST',
+      body: { commandId, deviceId, timestamp: Date.now(), point, source },
+    });
+  }
+
+  async swipeDevice(deviceId: string, input: SwipeCommandInput, commandId = crypto.randomUUID()): Promise<void> {
+    await this.request(`/devices/${encodeURIComponent(deviceId)}/swipe`, {
+      method: 'POST',
+      body: { commandId, deviceId, timestamp: Date.now(), ...input, source: 'INSPECTOR' },
+    });
+  }
+
+  async longPressDevice(deviceId: string, point: ScreenTapPoint, durationMs = 650, commandId = crypto.randomUUID()): Promise<void> {
+    await this.request(`/devices/${encodeURIComponent(deviceId)}/long-press`, {
+      method: 'POST',
+      body: { commandId, deviceId, timestamp: Date.now(), point, durationMs, source: 'INSPECTOR' },
+    });
+  }
+
+  async inputTextDevice(deviceId: string, text: string, commandId = crypto.randomUUID()): Promise<void> {
+    await this.request(`/devices/${encodeURIComponent(deviceId)}/input-text`, {
+      method: 'POST',
+      body: { commandId, deviceId, timestamp: Date.now(), text, source: 'INSPECTOR' },
+    });
+  }
+
+  async backDevice(deviceId: string, commandId = crypto.randomUUID()): Promise<void> {
+    await this.request(`/devices/${encodeURIComponent(deviceId)}/back`, { method: 'POST', body: { commandId, deviceId, timestamp: Date.now() } });
+  }
+
+  async homeDevice(deviceId: string, commandId = crypto.randomUUID()): Promise<void> {
+    await this.request(`/devices/${encodeURIComponent(deviceId)}/home`, { method: 'POST', body: { commandId, deviceId, timestamp: Date.now() } });
   }
 
   async applyStreamPolicy(command: StreamPolicyCommand): Promise<void> {

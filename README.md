@@ -28,7 +28,7 @@ The local service is implemented in `src/server/`:
 - `ControlCenterClient` uses HTTP for snapshots/commands and SSE for ordered, replayable events. Commands include a `commandId`, timestamp, and explicit device targets; repeated command IDs are idempotent.
 - `EventStore` is bounded and in-memory in this phase, with atomic replay subscription and a replaceable interface for a later durable event store.
 
-Available protocol routes include `GET /api/devices`, `GET /api/devices/discovery`, `GET /api/devices/:deviceId`, `GET /api/runtime`, `GET /api/events`, `POST /api/devices/configure`, `POST /api/devices/:deviceId/connect`, `POST /api/tasks/batch`, device lifecycle/action commands, and `POST /api/session/stream-policy`.
+Available protocol routes include `GET /api/devices`, `GET /api/devices/discovery`, `GET /api/devices/:deviceId`, `GET /api/runtime`, `GET /api/events`, `POST /api/devices/configure`, `POST /api/devices/:deviceId/connect`, `POST /api/devices/:deviceId/tap`, `POST /api/tasks/batch`, device lifecycle/action commands, and `POST /api/session/stream-policy`.
 
 The monitor wall supports 1, 4, 8, 9, 16, 25, and 32 channels, keyboard/mouse multi-selection, inspector-only detailed rendering, saved workspace settings, and monitor-only mode.
 
@@ -60,14 +60,14 @@ OMNIDECK_IOS_UDID=<udid> \
 OMNIDECK_WDA_URL=http://127.0.0.1:<wda-port> \
 npm run start:daemon
 
-# Mixed one-Android plus one-iPhone mode; remaining device slots stay simulated.
+# Mixed one-Android plus two-iPhone mode; remaining device slots stay simulated.
 OMNIDECK_ENABLE_REAL_DEVICES=true \
-OMNIDECK_ANDROID_DRIVER_MODE=ANDROID_ADB_SCRCPY \
-OMNIDECK_IOS_DRIVER_MODE=IOS_XCUITEST \
-OMNIDECK_ANDROID_SERIAL=<serial> \
-OMNIDECK_IOS_UDID=<udid> \
-OMNIDECK_WDA_URL=http://127.0.0.1:<wda-port> \
+OMNIDECK_ANDROID_SERIALS=<android-serial> \
+OMNIDECK_IOS_UDIDS=<ios-udid-1>,<ios-udid-2> \
+OMNIDECK_WDA_URLS=http://127.0.0.1:<wda-port-1>,http://127.0.0.1:<wda-port-2> \
 npm run start:daemon
 ```
 
 Before enabling either mode, enumerate the exact serial/UDID, verify authorization or trust without changing it, and run a one-device smoke test. Do not use these switches for unreviewed batch actions.
+
+Connected native devices expose a browser preview at `/api/devices/:deviceId/frame`. When a device is in `HUMAN_CONTROL`, fullscreen preview taps are sent through `/api/devices/:deviceId/tap` as device-scoped normalized coordinates. The monitor wall refreshes this screenshot-driven preview at up to 5 FPS according to the current stream policy; AI screenshots remain a separate high-resolution path. Set `OMNIDECK_START_SCRCPY_PROCESS=true` only when the daemon should also supervise a separate no-control scrcpy process.

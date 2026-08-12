@@ -17,6 +17,8 @@ import type {
 } from '../domain/types';
 import type { DeviceConfiguration, DeviceConnection } from '../domain/types';
 import type { DiscoveredDevice } from '../domain/deviceDiscovery';
+import type { IOSWdaStatus } from '../domain/iosWdaDiagnostics';
+import type { UiHierarchy } from '../domain/androidUiHierarchy';
 
 export const protocolVersion = 'v1' as const;
 
@@ -39,9 +41,16 @@ export interface DeviceSummaryDTO {
   sessionRevision: number;
   configuration: DeviceConfiguration | null;
   connection: DeviceConnection;
+  livePreview: boolean;
+  /** Low-latency H.264 preview over WebSocket + WebCodecs (Android scrcpy-server). */
+  previewVideoUrl: string | null;
+  /** MJPEG fallback preview for iOS or when H.264 is unavailable. */
+  previewStreamUrl: string | null;
 }
 
 export type DiscoveredDeviceDTO = DiscoveredDevice;
+export type IOSWdaStatusDTO = IOSWdaStatus;
+export type UiHierarchyDTO = UiHierarchy;
 
 export interface DeviceDetailDTO extends DeviceSummaryDTO {
   agentSessionId: string;
@@ -131,6 +140,34 @@ export const launchAppCommandSchema = deviceCommandSchema.extend({
   appId: z.string().trim().min(1).max(240).default('Omni Market'),
 });
 
+export const normalizedPointSchema = z.object({
+  x: z.number().finite().min(0).max(1),
+  y: z.number().finite().min(0).max(1),
+});
+
+export const screenTapCommandSchema = deviceCommandSchema.extend({
+  point: normalizedPointSchema,
+  source: z.enum(['LIVE_PREVIEW', 'FULLSCREEN_PREVIEW']).default('LIVE_PREVIEW'),
+});
+
+export const swipeCommandSchema = deviceCommandSchema.extend({
+  from: normalizedPointSchema,
+  to: normalizedPointSchema,
+  durationMs: z.number().int().min(0).max(5_000).default(350),
+  source: z.enum(['INSPECTOR', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
+});
+
+export const longPressCommandSchema = deviceCommandSchema.extend({
+  point: normalizedPointSchema,
+  durationMs: z.number().int().min(350).max(5_000).default(650),
+  source: z.enum(['INSPECTOR', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
+});
+
+export const inputTextCommandSchema = deviceCommandSchema.extend({
+  text: z.string().min(1).max(2_000),
+  source: z.enum(['INSPECTOR', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
+});
+
 export const streamPolicyCommandSchema = commandBase.extend({
   layout: z.union([z.literal(1), z.literal(4), z.literal(8), z.literal(9), z.literal(16), z.literal(25), z.literal(32)]),
   focusedId: z.string().nullable(),
@@ -168,6 +205,10 @@ export interface ConnectionAttemptDTO extends DeviceConnection {
 export type BatchTaskCommand = z.infer<typeof batchTaskCommandSchema>;
 export type DeviceCommand = z.infer<typeof deviceCommandSchema>;
 export type LaunchAppCommand = z.infer<typeof launchAppCommandSchema>;
+export type ScreenTapCommand = z.infer<typeof screenTapCommandSchema>;
+export type SwipeCommand = z.infer<typeof swipeCommandSchema>;
+export type LongPressCommand = z.infer<typeof longPressCommandSchema>;
+export type InputTextCommand = z.infer<typeof inputTextCommandSchema>;
 export type StreamPolicyCommand = z.infer<typeof streamPolicyCommandSchema>;
 
 export const cloneSnapshot = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -190,6 +231,13 @@ export const toDeviceSummary = (session: DeviceSession): DeviceSummaryDTO => clo
   sessionRevision: session.sessionRevision,
   configuration: session.configuration,
   connection: session.connection,
+  livePreview: Boolean(session.configuration && session.configuration.driverMode !== 'SIMULATED' && session.connection.state === 'CONNECTED'),
+  previewVideoUrl: session.configuration?.driverMode === 'ANDROID_ADB_SCRCPY' && session.connection.state === 'CONNECTED'
+    ? `/api/devices/${encodeURIComponent(session.id)}/video`
+    : null,
+  previewStreamUrl: session.configuration && session.configuration.driverMode !== 'SIMULATED' && session.connection.state === 'CONNECTED'
+    ? `/api/devices/${encodeURIComponent(session.id)}/mjpeg`
+    : null,
 });
 
 export const toDeviceDetail = (session: DeviceSession): DeviceDetailDTO => cloneSnapshot({

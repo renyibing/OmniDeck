@@ -1,9 +1,24 @@
-import { ArrowLeft, Bot, Hand, Radio } from 'lucide-react';
+import { ArrowLeft, Bot, Hand } from 'lucide-react';
 import type { DeviceSummaryDTO } from '../server/protocol';
+import { DeviceScreen } from './DeviceScreen';
+import type { ScreenTapPoint } from '../app/controlCenterClient';
 
-export function FullscreenDevice({ device, onClose, onTakeControl }: { device: DeviceSummaryDTO; onClose: () => void; onTakeControl: (id: string) => void }) {
+export function FullscreenDevice({
+  device,
+  onClose,
+  onTakeControl,
+  onReleaseControl,
+  onTap,
+}: {
+  device: DeviceSummaryDTO;
+  onClose: () => void;
+  onTakeControl: (id: string) => void;
+  onReleaseControl: (id: string) => void;
+  onTap: (id: string, point: ScreenTapPoint) => void;
+}) {
+  const humanControl = device.agentStatus === 'HUMAN_CONTROL';
   const statusMessage = device.agentStatus === 'HUMAN_CONTROL'
-    ? 'Agent execution is paused while manual control is active.'
+    ? 'Manual control is active. Taps on the preview are sent only to this device.'
     : 'Agent continues running independently while views change.';
-  return <div className="fullscreen-device"><header><button onClick={onClose}><ArrowLeft size={18}/> Back to monitor wall</button><div><strong>{device.name}</strong><span>{device.id} · session rev {device.sessionRevision}</span></div><span className="live-indicator"><i/> LIVE · 60 FPS</span><button className="takeover-button" onClick={() => onTakeControl(device.id)}><Hand size={16}/> Take control</button></header><main><div className={`large-phone screen-${device.screenshotSeed}`}><div className="phone-status"><span>9:41</span><span><Radio size={12}/></span></div><div className="large-app"><span>{device.currentApp}</span><strong>Account overview</strong><div className="large-chart"><i/><i/><i/><i/><i/><i/></div><div className="large-rows"><span/><span/><span/></div></div></div><aside><span><Bot size={16}/> AGENT SESSION</span><strong>{device.agentStatus}</strong><p>{device.currentTask?.goal ?? 'Waiting for task'}</p><small>{statusMessage}</small></aside></main></div>;
+  return <div className="fullscreen-device"><header><button onClick={onClose}><ArrowLeft size={18}/> Back to monitor wall</button><div><strong>{device.name}</strong><span>{device.id} · session rev {device.sessionRevision}</span></div><span className="live-indicator"><i/> {device.livePreview ? (device.previewVideoUrl ? `LIVE · H.264 · ${Math.min(Math.max(device.stream.fps, 15), 30)} FPS` : `LIVE · MJPEG · ${Math.min(Math.max(device.stream.fps, 8), 15)} FPS`) : `LIVE · ${device.stream.fps} FPS`}</span><button className="takeover-button" onClick={() => (humanControl ? onReleaseControl(device.id) : onTakeControl(device.id))}><Hand size={16}/> {humanControl ? 'Release control' : 'Take control'}</button></header><main><DeviceScreen device={device} fallback="fullscreen" canControl={humanControl} onTap={point => onTap(device.id, point)}/><aside><span><Bot size={16}/> AGENT SESSION</span><strong>{device.agentStatus}</strong><p>{device.currentTask?.goal ?? 'Waiting for task'}</p><small>{statusMessage}</small></aside></main></div>;
 }

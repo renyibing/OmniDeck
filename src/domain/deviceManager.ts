@@ -66,6 +66,12 @@ export class DeviceManager {
       name: configuration.name,
       currentApp: configuration.appId,
       configuration,
+      deviceDriver: configuration.driverMode === 'SIMULATED'
+        ? session.deviceDriver
+        : { ...session.deviceDriver, connected: false },
+      connection: configuration.driverMode === 'SIMULATED'
+        ? session.connection
+        : { ...session.connection, state: 'DISCONNECTED', connectedAt: null, error: null },
     }));
   }
 

@@ -8,6 +8,7 @@
     "dev:web": "vite",
     "dev:daemon": "tsx watch src/server/index.ts",
     "start:daemon": "tsx src/server/index.ts",
+    "smoke:android-actions": "tsx scripts/android-action-smoke.ts",
     "build": "tsc -b && vite build",
     "test": "vitest run",
     "lint": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
@@ -17,12 +18,14 @@
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
+    "ws": "^8.21.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "@types/ws": "^8.18.1",
     "concurrently": "^10.0.4",
     "tsx": "^4.23.12",
     "typescript": "latest",
