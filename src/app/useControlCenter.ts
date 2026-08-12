@@ -53,7 +53,9 @@ export function useControlCenter() {
 
   useEffect(() => {
     const controller = new AbortController();
+    let cancelled = false;
     void client.getRuntime(controller.signal).then(next => {
+      if (cancelled) return;
       setRuntime(next);
       setDevices(next.devices);
       setConnection('connecting');
@@ -63,9 +65,9 @@ export function useControlCenter() {
         setDetailVersion(version => version + 1);
       });
       cleanup.current = stop;
-    }).catch(() => setConnection('disconnected'));
+    }).catch(() => { if (!cancelled) setConnection('disconnected'); });
     const cleanup = { current: (() => undefined) as () => void };
-    return () => { controller.abort(); cleanup.current(); };
+    return () => { cancelled = true; controller.abort(); cleanup.current(); };
 
     function applyEvent(event: EventEnvelope) {
       if (event.type === 'DEVICE_UPDATED' && event.payload.snapshot) {
@@ -90,7 +92,7 @@ export function useControlCenter() {
 
   useEffect(() => {
     if (!runtime || !activeGroup) return;
-    const command = { commandId: crypto.randomUUID(), timestamp: Date.now(), layout, focusedId, fullscreenId, visibleDeviceIds: visibleDevices.map(device => device.id) } as const;
+    const command = { commandId: crypto.randomUUID(), timestamp: Date.now(), layout, focusedId, fullscreenId, visibleDeviceIds: visibleDevices.map(device => device.id), targetDeviceIds: devices.map(device => device.id) } as const;
     void client.applyStreamPolicy(command).catch(error => setToast(error instanceof Error ? error.message : 'Stream policy unavailable'));
     localStorage.setItem('omnideck.layout', String(layout));
   }, [client, runtime?.server.sessionEpoch, layout, focusedId, fullscreenId, visibleDeviceKey]);

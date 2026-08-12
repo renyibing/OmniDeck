@@ -49,9 +49,9 @@ Local ControlDaemon
   EventStore -> ordered in-memory event replay
 ```
 
-`DeviceSummaryDTO` is the wall contract and excludes histories, memory, task context, and driver internals. `DeviceDetailDTO` is loaded only for the selected device. `sessionEpoch` identifies the daemon process and `sessionRevision` identifies a stable device session; neither changes for layout, fullscreen, inspector, or page refresh while the daemon remains running.
+`DeviceSummaryDTO` is the wall contract and excludes histories, memory, task context, logs, and driver internals. `DeviceDetailDTO` is loaded only for the selected device and contains timeline plus bounded session logs. `sessionEpoch` identifies the daemon process and `sessionRevision` identifies a stable device session; neither changes for layout, fullscreen, inspector, or page refresh while the daemon remains running.
 
-Commands are validated with Zod and require `commandId`, `timestamp`, and explicit device target IDs. The daemon caches successful command results to make transport retries idempotent and rejects conflicting reuse of a command ID.
+Commands are validated with Zod and require `commandId`, `timestamp`, and explicit device target IDs. Batch commands reject unknown targets instead of silently dropping them; offline targets remain resumable `DEVICE_OFFLINE` instances. The daemon caches successful command results to make transport retries idempotent and rejects conflicting reuse of a command ID. SSE registers a live listener before taking its replay snapshot, preventing reconnect gaps.
 
 ## State rules
 

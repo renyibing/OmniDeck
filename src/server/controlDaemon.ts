@@ -129,6 +129,8 @@ export class ControlDaemon {
   }
 
   async executeBatch(command: BatchTaskCommand): Promise<TaskInstance[]> {
+    const missing = command.targetDeviceIds.filter(deviceId => !this.devices.get(deviceId));
+    if (missing.length) throw new HttpError(404, `Device not found: ${missing.join(', ')}`);
     return this.controlPlane.submitBatch(command.goal, command.targetDeviceIds, command.priority).map(cloneSnapshot);
   }
 
@@ -208,6 +210,8 @@ export class ControlDaemon {
 
       if (request.method === 'POST' && url.pathname === '/api/session/stream-policy') {
         const command = streamPolicyCommandSchema.parse(await this.body(request));
+        const missing = command.targetDeviceIds.filter(deviceId => !this.devices.get(deviceId));
+        if (missing.length) throw new HttpError(404, `Device not found: ${missing.join(', ')}`);
         const result = await this.idempotent(command.commandId, command, async () => {
           this.applyStreamPolicy(command);
           return { status: 200, payload: { version: protocolVersion, commandId: command.commandId } };
@@ -232,8 +236,9 @@ export class ControlDaemon {
     });
     response.write('retry: 1000\n\n');
     const write = (event: EventEnvelope) => response.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
-    this.events.since(Math.max(0, since)).forEach(write);
-    const unsubscribe = this.events.subscribe(write);
+    const subscription = this.events.subscribeSince(Math.max(0, since), write);
+    subscription.replay.forEach(write);
+    const unsubscribe = subscription.unsubscribe;
     const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 15_000);
     let closed = false;
     let connection: Connection;

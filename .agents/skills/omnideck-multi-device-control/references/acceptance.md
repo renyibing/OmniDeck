@@ -21,6 +21,7 @@
 - `GET /api/devices/:deviceId` is the only public route that returns timeline/task-history detail.
 - Batch and device commands reject malformed input, require explicit IDs, and return the same result for a retried `commandId`.
 - `GET /api/events?since=N` replays events in strictly increasing sequence order; the client performs a full runtime resync before reconnecting.
+- SSE replay subscription registers the live listener before replaying the bounded backlog, so an event appended during reconnect cannot be lost.
 - API integration tests cover worker configuration (`maxConcurrentAI=8`, `maxConcurrentVLM=4`), isolated disconnect, recovery with explicit resume, and human takeover.
 
 ## Browser validation

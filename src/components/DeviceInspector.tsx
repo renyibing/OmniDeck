@@ -32,7 +32,7 @@ export function DeviceInspector({ device, onClose, onFullscreen, onOffline, onTa
       <div className="section-title"><span><Activity size={14}/> DEVICE HEALTH</span><b className={device.health.toLowerCase()}>{device.health}</b></div>
       <dl><div><dt>Platform</dt><dd>{device.platform}</dd></div><div><dt>Network</dt><dd><Wifi size={12}/>{device.metrics.network}</dd></div><div><dt>Stream</dt><dd>{device.stream.width}×{device.stream.height}</dd></div><div><dt>Agent session</dt><dd>rev {device.sessionRevision}</dd></div></dl>
     </section>
-    <section className="inspector-section logs"><div className="section-title"><span><ScrollText size={14}/> SESSION LOG</span></div><code>09:42:14 action.tap completed (84ms)</code><code>09:42:15 ui.change detected</code><code>09:42:17 screenshot queued</code></section>
+    <section className="inspector-section logs"><div className="section-title"><span><ScrollText size={14}/> SESSION LOG</span></div>{'logs' in device ? device.logs.slice(-8).map(entry => <code key={entry.id}>{entry.time} {entry.kind.toLowerCase()} {entry.message}</code>) : <code>Loading selected-device logs...</code>}</section>
     <button className="disconnect-test" onClick={() => onOffline(device.id)}>{device.status === 'OFFLINE' ? 'Simulate recovery' : 'Simulate disconnect'}</button>
   </aside>;
 }

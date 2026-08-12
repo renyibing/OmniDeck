@@ -24,9 +24,9 @@ npm run dev
 The local service is implemented in `src/server/`:
 
 - `ControlDaemon` owns the single process-local `DeviceManager`, `SessionManager`, `TaskScheduler`, `DriverRegistry`, and `ControlPlane`.
-- `protocol.ts` exposes versioned `DeviceSummaryDTO` wall snapshots and `DeviceDetailDTO` inspector snapshots. Histories and task context are fetched only for the selected device.
+- `protocol.ts` exposes versioned `DeviceSummaryDTO` wall snapshots and `DeviceDetailDTO` inspector snapshots. Histories, task context, and selected-device logs are fetched only for the selected device.
 - `ControlCenterClient` uses HTTP for snapshots/commands and SSE for ordered, replayable events. Commands include a `commandId`, timestamp, and explicit device targets; repeated command IDs are idempotent.
-- `EventStore` is bounded and in-memory in this phase, with a replaceable interface for a later durable event store.
+- `EventStore` is bounded and in-memory in this phase, with atomic replay subscription and a replaceable interface for a later durable event store.
 
 Available protocol routes include `GET /api/devices`, `GET /api/devices/:deviceId`, `GET /api/runtime`, `GET /api/events`, `POST /api/tasks/batch`, device lifecycle/action commands, and `POST /api/session/stream-policy`.
 
@@ -35,7 +35,7 @@ The monitor wall supports 1, 4, 8, 9, 16, 25, and 32 channels, keyboard/mouse mu
 ## Current scope
 
 - Eight, sixteen, and thirty-two device sessions are covered by unit simulation; the UI starts with 32 isolated simulated sessions.
-- API integration tests cover 32 backend sessions, lightweight/detail DTO separation, command validation and idempotency, monotonic SSE replay, worker limits, disconnect/recovery, explicit resume, and human takeover isolation.
+- API integration tests cover 32 backend sessions, lightweight/detail DTO separation, command target validation and idempotency, monotonic/atomic SSE replay, worker limits, disconnect/recovery, explicit resume, and human takeover isolation.
 - Android ADB, iOS XCUITest/Appium, scrcpy/iOS mirroring, backend transport, persistent task storage, and real telemetry are adapter/infrastructure work still to be connected.
 - AI observation is event/screenshot driven. Monitor streams are preview profiles and are not passed continuously to the agent.
 

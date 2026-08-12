@@ -27,4 +27,10 @@ export class EventStore {
   since(sequence = 0): EventEnvelope[] { return this.events.filter(event => event.sequence > sequence); }
   latest(): number { return this.sequence; }
   subscribe(listener: EventListener): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+
+  /** Registers before taking the replay snapshot so append/reconnect cannot leave a gap. */
+  subscribeSince(sequence: number, listener: EventListener): { replay: EventEnvelope[]; unsubscribe: () => void } {
+    this.listeners.add(listener);
+    return { replay: this.since(sequence), unsubscribe: () => this.listeners.delete(listener) };
+  }
 }

@@ -44,6 +44,7 @@ export interface DeviceDetailDTO extends DeviceSummaryDTO {
   taskHistory: TaskInstance[];
   taskContext: TaskContext;
   actionHistory: TimelineEvent[];
+  logs: TimelineEvent[];
 }
 
 export interface RuntimeSnapshot {
@@ -83,6 +84,21 @@ export interface EventEnvelope {
   payload: Record<string, unknown>;
 }
 
+export const eventEnvelopeSchema = z.object({
+  version: z.literal(protocolVersion),
+  eventId: z.string().min(1),
+  sequence: z.number().int().positive(),
+  occurredAt: z.number().int().positive(),
+  type: z.enum([
+    'DEVICE_ADDED', 'DEVICE_UPDATED', 'DEVICE_OFFLINE', 'DEVICE_RECOVERED',
+    'TASK_CREATED', 'TASK_QUEUED', 'TASK_STARTED', 'TASK_PAUSED', 'TASK_COMPLETED', 'TASK_FAILED',
+    'WORKER_POOL_UPDATED', 'HEALTH_UPDATED', 'HUMAN_CONTROL_STARTED', 'HUMAN_CONTROL_RELEASED',
+  ]),
+  deviceId: z.string().nullable(),
+  taskId: z.string().nullable(),
+  payload: z.record(z.string(), z.unknown()),
+});
+
 const commandBase = z.object({
   commandId: z.string().trim().min(1).max(120),
   timestamp: z.number().int().positive(),
@@ -107,6 +123,7 @@ export const streamPolicyCommandSchema = commandBase.extend({
   focusedId: z.string().nullable(),
   fullscreenId: z.string().nullable(),
   visibleDeviceIds: z.array(z.string()).max(128),
+  targetDeviceIds: z.array(z.string().trim().min(1)).min(1).max(128),
 });
 
 export type BatchTaskCommand = z.infer<typeof batchTaskCommandSchema>;
@@ -143,6 +160,7 @@ export const toDeviceDetail = (session: DeviceSession): DeviceDetailDTO => clone
   taskHistory: session.taskHistory,
   taskContext: session.taskContext,
   actionHistory: session.actionHistory,
+  logs: session.actionHistory,
 });
 
 export const toRuntimeSnapshot = (args: {

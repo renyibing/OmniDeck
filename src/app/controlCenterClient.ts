@@ -1,4 +1,4 @@
-import type { DeviceDetailDTO, DeviceSummaryDTO, EventEnvelope, RuntimeSnapshot, StreamPolicyCommand, BatchTaskCommand } from '../server/protocol';
+import { eventEnvelopeSchema, type DeviceDetailDTO, type DeviceSummaryDTO, type EventEnvelope, type RuntimeSnapshot, type StreamPolicyCommand, type BatchTaskCommand } from '../server/protocol';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 export type DeviceAction = 'pause' | 'resume' | 'stop' | 'retry' | 'take-control' | 'release-control' | 'disconnect' | 'recover' | 'restart-app' | 'launch-app';
@@ -55,16 +55,21 @@ export class ControlCenterClient {
     let reconnectTimer: number | null = null;
     let closed = false;
     let reconnectAttempt = 0;
+    let connectionGeneration = 0;
 
     const setState = (state: ConnectionState) => onState(state);
     const connect = () => {
       if (closed) return;
+      reconnectTimer = null;
+      const generation = ++connectionGeneration;
       setState(reconnectAttempt ? 'reconnecting' : 'connecting');
-      source = new EventSource(`${this.apiBase}/events?since=${lastSequence}`);
-      source.onopen = () => { reconnectAttempt = 0; setState('connected'); };
-      source.onmessage = event => {
+      const currentSource = new EventSource(`${this.apiBase}/events?since=${lastSequence}`);
+      source = currentSource;
+      currentSource.onopen = () => { if (closed || source !== currentSource) return; reconnectAttempt = 0; setState('connected'); };
+      currentSource.onmessage = event => {
+        if (closed || source !== currentSource) return;
         try {
-          const envelope = JSON.parse(event.data) as EventEnvelope;
+          const envelope = eventEnvelopeSchema.parse(JSON.parse(event.data)) as EventEnvelope;
           if (envelope.sequence <= lastSequence) return;
           lastSequence = envelope.sequence;
           onEvent(envelope);
@@ -72,13 +77,15 @@ export class ControlCenterClient {
           setState('reconnecting');
         }
       };
-      source.onerror = () => {
-        source?.close();
+      currentSource.onerror = () => {
+        if (closed || source !== currentSource || generation !== connectionGeneration) return;
+        currentSource.close();
         source = null;
-        if (closed) return;
+        if (reconnectTimer !== null) return;
         reconnectAttempt += 1;
         setState('reconnecting');
         void this.getRuntime().then(runtime => {
+          if (closed || generation !== connectionGeneration) return;
           lastSequence = runtime.server.latestSequence;
           onResync(runtime);
         }).catch(() => undefined);

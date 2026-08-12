@@ -53,6 +53,7 @@ describe('Control Daemon HTTP/SSE protocol', () => {
     expect(device).toHaveProperty('taskContext');
     expect(device).toHaveProperty('taskHistory');
     expect(device).toHaveProperty('agentSessionId');
+    expect(device).toHaveProperty('logs');
   });
 
   it('validates commands and enforces URL/device target agreement', async () => {
@@ -62,6 +63,13 @@ describe('Control Daemon HTTP/SSE protocol', () => {
 
     expect(invalid.response.status).toBe(400);
     expect(mismatch.response.status).toBe(400);
+  });
+
+  it('rejects unknown batch targets instead of silently dropping them', async () => {
+    const { baseUrl } = await start();
+    const result = await json(baseUrl, '/api/tasks/batch', postBody({ commandId: 'unknown-target-1', timestamp: Date.now(), targetDeviceIds: ['device-01', 'missing-device'], goal: 'Validate target' }));
+    expect(result.response.status).toBe(404);
+    expect(result.body.error).toContain('missing-device');
   });
 
   it('makes repeated batch command IDs idempotent and rejects conflicting reuse', async () => {
@@ -76,6 +84,15 @@ describe('Control Daemon HTTP/SSE protocol', () => {
     expect(second.body).toEqual(first.body);
     expect(conflict.response.status).toBe(409);
     expect((first.body.tasks as unknown[])).toHaveLength(1);
+  });
+
+  it('keeps an offline batch target as a resumable DEVICE_OFFLINE instance', async () => {
+    const { baseUrl } = await start();
+    await json(baseUrl, '/api/devices/device-14/recover', postBody({ commandId: 'recover-before-offline-task', timestamp: Date.now(), deviceId: 'device-14' }));
+    await json(baseUrl, '/api/devices/device-14/disconnect', postBody({ commandId: 'offline-before-task', timestamp: Date.now(), deviceId: 'device-14' }));
+    const result = await json(baseUrl, '/api/tasks/batch', postBody({ commandId: 'offline-task-1', timestamp: Date.now(), targetDeviceIds: ['device-14'], goal: 'Wait for recovery' }));
+    expect(result.response.status).toBe(202);
+    expect((result.body.tasks as Array<Record<string, unknown>>)[0].status).toBe('DEVICE_OFFLINE');
   });
 
   it('keeps AI worker usage at eight and expands a batch into independent task instances', async () => {

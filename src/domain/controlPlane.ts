@@ -42,11 +42,20 @@ export class ControlPlane {
   }
 
   submitBatch(goal: string, deviceIds: string[], priority = 1): TaskInstance[] {
-    const eligible = deviceIds.filter(deviceId => this.devices.get(deviceId)?.status === 'ONLINE');
-    const tasks = this.scheduler.createInstances(goal, eligible, priority);
+    const targets = deviceIds.filter(deviceId => this.devices.get(deviceId));
+    const tasks = this.scheduler.createInstances(goal, targets, priority);
     tasks.forEach(task => {
       this.tasks.set(task.id, task);
       const session = this.devices.get(task.deviceId)!;
+      if (session.status !== 'ONLINE') {
+        task.status = 'DEVICE_OFFLINE';
+        task.updatedAt = Date.now();
+        session.currentTask = task;
+        session.agentStatus = 'ERROR';
+        session.agentSession.status = 'ERROR';
+        this.record(session, 'SYSTEM', 'Task created while device is offline; resume after recovery');
+        return;
+      }
       if (this.isDeviceBusy(session)) {
         session.taskQueue.push(task);
         this.record(session, 'SYSTEM', 'Task queued behind the device’s current task');
