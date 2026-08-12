@@ -28,7 +28,7 @@ The local service is implemented in `src/server/`:
 - `ControlCenterClient` uses HTTP for snapshots/commands and SSE for ordered, replayable events. Commands include a `commandId`, timestamp, and explicit device targets; repeated command IDs are idempotent.
 - `EventStore` is bounded and in-memory in this phase, with atomic replay subscription and a replaceable interface for a later durable event store.
 
-Available protocol routes include `GET /api/devices`, `GET /api/devices/:deviceId`, `GET /api/runtime`, `GET /api/events`, `POST /api/tasks/batch`, device lifecycle/action commands, and `POST /api/session/stream-policy`.
+Available protocol routes include `GET /api/devices`, `GET /api/devices/discovery`, `GET /api/devices/:deviceId`, `GET /api/runtime`, `GET /api/events`, `POST /api/devices/configure`, `POST /api/devices/:deviceId/connect`, `POST /api/tasks/batch`, device lifecycle/action commands, and `POST /api/session/stream-policy`.
 
 The monitor wall supports 1, 4, 8, 9, 16, 25, and 32 channels, keyboard/mouse multi-selection, inspector-only detailed rendering, saved workspace settings, and monitor-only mode.
 
@@ -36,7 +36,38 @@ The monitor wall supports 1, 4, 8, 9, 16, 25, and 32 channels, keyboard/mouse mu
 
 - Eight, sixteen, and thirty-two device sessions are covered by unit simulation; the UI starts with 32 isolated simulated sessions.
 - API integration tests cover 32 backend sessions, lightweight/detail DTO separation, command target validation and idempotency, monotonic/atomic SSE replay, worker limits, disconnect/recovery, explicit resume, and human takeover isolation.
-- Android ADB, iOS XCUITest/Appium, scrcpy/iOS mirroring, backend transport, persistent task storage, and real telemetry are adapter/infrastructure work still to be connected.
+- The default runtime remains fully simulated. It performs no hardware discovery or device command.
+- `AndroidAdbScrcpyDriver` executes device-scoped `adb -s <serial>` commands, takes independent `adb exec-out screencap -p` AI screenshots, and can supervise a no-control scrcpy preview process.
+- `IOSXCUITestDriver` communicates only with an explicitly configured device-local WebDriverAgent URL. WDA provisioning, signing, installation, and MJPEG/WebRTC delivery remain deployment concerns outside source control.
+- A browser video gateway is not implemented yet: starting scrcpy is not equivalent to delivering a real stream to a `DeviceTile`. WebRTC/MSE fan-out is the next required layer for a real monitor wall.
 - AI observation is event/screenshot driven. Monitor streams are preview profiles and are not passed continuously to the agent.
 
-All device actions remain simulated. No real Android or iOS hardware is accessed by this repository yet.
+## Guarded native-driver mode
+
+Native drivers are opt-in. The daemon refuses to create an Android driver without a serial and refuses to create an iOS driver without both UDID and WDA URL. Nothing below runs unless `OMNIDECK_ENABLE_REAL_DEVICES=true` is set.
+
+```bash
+# One explicitly named Android device. No default ADB target is ever used.
+OMNIDECK_ENABLE_REAL_DEVICES=true \
+OMNIDECK_DRIVER_MODE=ANDROID_ADB_SCRCPY \
+OMNIDECK_ANDROID_SERIAL=<serial> \
+npm run start:daemon
+
+# One explicitly named iPhone backed by an already-running device-local WDA.
+OMNIDECK_ENABLE_REAL_DEVICES=true \
+OMNIDECK_DRIVER_MODE=IOS_XCUITEST \
+OMNIDECK_IOS_UDID=<udid> \
+OMNIDECK_WDA_URL=http://127.0.0.1:<wda-port> \
+npm run start:daemon
+
+# Mixed one-Android plus one-iPhone mode; remaining device slots stay simulated.
+OMNIDECK_ENABLE_REAL_DEVICES=true \
+OMNIDECK_ANDROID_DRIVER_MODE=ANDROID_ADB_SCRCPY \
+OMNIDECK_IOS_DRIVER_MODE=IOS_XCUITEST \
+OMNIDECK_ANDROID_SERIAL=<serial> \
+OMNIDECK_IOS_UDID=<udid> \
+OMNIDECK_WDA_URL=http://127.0.0.1:<wda-port> \
+npm run start:daemon
+```
+
+Before enabling either mode, enumerate the exact serial/UDID, verify authorization or trust without changing it, and run a one-device smoke test. Do not use these switches for unreviewed batch actions.

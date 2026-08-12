@@ -7,6 +7,9 @@ import { SessionManager } from './sessionManager';
 import { StreamManager } from './streamManager';
 import { TaskScheduler } from './taskScheduler';
 import type { ConcurrencyConfig, TaskInstance } from './types';
+import { AndroidAdbScrcpyDriver } from './androidDeviceDriver';
+import { NativeToolError, ProcessRunner } from './nativeProcess';
+import { EventEmitter } from 'node:events';
 
 const config: ConcurrencyConfig = { maxConcurrentAI: 8, maxConcurrentVLM: 4, maxConcurrentADB: 12, maxConcurrentIOS: 4, timeoutMs: 90_000, maxRetries: 2 };
 
@@ -48,6 +51,52 @@ describe('multi-device sessions', () => {
     manager.recover('device-01');
     expect(manager.get('device-01')?.agentStatus).toBe('PAUSED');
     expect(manager.get('device-01')?.currentTask?.status).toBe('DEVICE_OFFLINE');
+  });
+});
+
+describe('native driver boundaries', () => {
+  it('requires an explicit serial and never builds an unscoped Android command', async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner = {
+      run: vi.fn(async (options: { command: string; args: string[] }) => {
+        calls.push(options);
+        return { code: 0, stdout: 'device\n', stderr: '' };
+      }),
+      spawn: vi.fn(),
+    } as unknown as ProcessRunner;
+    const driver = new AndroidAdbScrcpyDriver('device-01', { serial: 'serial-01', runner });
+    await driver.connect();
+    await driver.screenshot({ purpose: 'AI', width: 100, height: 200 });
+    expect(calls).toEqual([
+      { command: 'adb', args: ['-s', 'serial-01', 'get-state'] },
+      { command: 'adb', args: ['-s', 'serial-01', 'exec-out', 'screencap', '-p'] },
+    ]);
+  });
+
+  it('does not allow Android actions before connect', async () => {
+    const driver = new AndroidAdbScrcpyDriver('device-01', { serial: 'serial-01' });
+    await expect(driver.screenshot({ purpose: 'AI', width: 100, height: 200 })).rejects.toBeInstanceOf(NativeToolError);
+  });
+
+  it('scopes scrcpy to the serial and restarts only when the stream profile changes', async () => {
+    const spawned: Array<{ command: string; args: string[]; process: EventEmitter & { kill: ReturnType<typeof vi.fn> } }> = [];
+    const runner = {
+      run: vi.fn(async () => ({ code: 0, stdout: 'device\n', stderr: '' })),
+      spawn: vi.fn((options: { command: string; args: string[] }) => {
+        const process = Object.assign(new EventEmitter(), { kill: vi.fn() });
+        spawned.push({ ...options, process });
+        return process;
+      }),
+    } as unknown as ProcessRunner;
+    const driver = new AndroidAdbScrcpyDriver('device-01', { serial: 'serial-01', runner });
+    await driver.connect();
+    const preview = { mode: 'PREVIEW', width: 480, height: 854, fps: 10, bitrateKbps: 900 } as const;
+    driver.applyStreamProfile(preview);
+    driver.applyStreamProfile(preview);
+    driver.applyStreamProfile({ ...preview, fps: 5 });
+    expect(spawned).toHaveLength(2);
+    expect(spawned[0].args.slice(0, 2)).toEqual(['-s', 'serial-01']);
+    expect(spawned[0].process.kill).toHaveBeenCalledWith('SIGTERM');
   });
 });
 

@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ZodError } from 'zod';
 import { ControlPlane, DeviceDiscovery, DeviceManager, DriverRegistry, SessionManager, SimulatedDeviceDriver, TaskScheduler } from '../domain';
-import type { DeviceSession, TaskInstance, TaskStatus } from '../domain/types';
+import { AndroidAdbScrcpyDriver } from '../domain/androidDeviceDriver';
+import { IOSXCUITestDriver } from '../domain/iosXcuitestDriver';
+import type { DeviceSession, DriverMode, TaskInstance, TaskStatus } from '../domain/types';
 import { EventStore } from './eventStore';
 import {
   batchTaskCommandSchema,
@@ -50,6 +52,15 @@ export interface ControlDaemonOptions {
   autoExecute?: boolean;
   driverLatencyMs?: number;
   healthCheckIntervalMs?: number;
+  driverMode?: DriverMode;
+  androidDriverMode?: DriverMode;
+  iosDriverMode?: DriverMode;
+  realDevices?: boolean;
+  androidSerial?: string;
+  iosUdid?: string;
+  wdaUrl?: string;
+  adbPath?: string;
+  scrcpyPath?: string;
 }
 
 export class ControlDaemon {
@@ -74,11 +85,28 @@ export class ControlDaemon {
 
   constructor(options: ControlDaemonOptions = {}) {
     this.devices = new DeviceManager(options.deviceCount ?? 32);
-    this.discovery = new DeviceDiscovery(this.devices);
+    const nativeEnabled = options.realDevices === true;
+    const androidDriverMode = nativeEnabled
+      ? options.androidDriverMode ?? (options.driverMode === 'ANDROID_ADB_SCRCPY' ? options.driverMode : options.androidSerial ? 'ANDROID_ADB_SCRCPY' : 'SIMULATED')
+      : 'SIMULATED';
+    const iosDriverMode = nativeEnabled
+      ? options.iosDriverMode ?? (options.driverMode === 'IOS_XCUITEST' ? options.driverMode : options.iosUdid && options.wdaUrl ? 'IOS_XCUITEST' : 'SIMULATED')
+      : 'SIMULATED';
+    if (androidDriverMode === 'ANDROID_ADB_SCRCPY' && !options.androidSerial) throw new Error('ANDROID_ADB_SCRCPY requires an explicit androidSerial');
+    if (iosDriverMode === 'IOS_XCUITEST' && (!options.iosUdid || !options.wdaUrl)) throw new Error('IOS_XCUITEST requires explicit iosUdid and wdaUrl');
+    this.discovery = new DeviceDiscovery(this.devices, { androidDriverMode, iosDriverMode, androidIdentifier: options.androidSerial, iosIdentifier: options.iosUdid });
     this.sessions = new SessionManager(this.devices);
     this.scheduler = new TaskScheduler(concurrency);
     this.drivers = new DriverRegistry();
-    this.devices.getAll().forEach(device => this.drivers.register(new SimulatedDeviceDriver(device, options.driverLatencyMs ?? 20)));
+    this.devices.getAll().forEach(device => {
+      if (androidDriverMode === 'ANDROID_ADB_SCRCPY' && device.id === 'device-01') {
+        this.drivers.register(new AndroidAdbScrcpyDriver(device.id, { serial: options.androidSerial!, adbPath: options.adbPath, scrcpyPath: options.scrcpyPath }));
+      } else if (iosDriverMode === 'IOS_XCUITEST' && device.id === 'device-03') {
+        this.drivers.register(new IOSXCUITestDriver(device.id, { udid: options.iosUdid!, wdaUrl: options.wdaUrl! }));
+      } else {
+        this.drivers.register(new SimulatedDeviceDriver(device, options.driverLatencyMs ?? 20));
+      }
+    });
     this.groups = this.makeGroups(this.devices.getAll());
     this.controlPlane = new ControlPlane(this.devices, this.scheduler, this.drivers, { autoExecute: options.autoExecute ?? true });
     this.captureBaseline();
@@ -127,9 +155,11 @@ export class ControlDaemon {
     if (this.healthTimer) clearInterval(this.healthTimer);
     this.connections.forEach(connection => connection.close());
     this.connections.clear();
-    if (!this.server) return;
-    await new Promise<void>((resolve, reject) => this.server!.close(error => error ? reject(error) : resolve()));
-    this.server = null;
+    await this.drivers.disconnectAll();
+    if (this.server) {
+      await new Promise<void>((resolve, reject) => this.server!.close(error => error ? reject(error) : resolve()));
+      this.server = null;
+    }
   }
 
   async executeBatch(command: BatchTaskCommand): Promise<TaskInstance[]> {
@@ -167,8 +197,8 @@ export class ControlDaemon {
     const candidate = this.discovery.getByDeviceId(configuration.deviceId);
     const session = this.devices.get(configuration.deviceId);
     if (!candidate || !session) throw new HttpError(404, 'Device candidate not found');
-    if (candidate.platform !== configuration.platform || candidate.transport !== configuration.transport) {
-      throw new HttpError(400, 'Device platform and transport do not match the discovered candidate');
+    if (candidate.platform !== configuration.platform || candidate.transport !== configuration.transport || candidate.driverMode !== configuration.driverMode) {
+      throw new HttpError(400, 'Device platform, transport, and driver mode must match the discovered candidate');
     }
     if (candidate.identifier !== configuration.identifier) {
       throw new HttpError(400, 'Device identifier does not match the discovered candidate');
@@ -192,6 +222,7 @@ export class ControlDaemon {
       await this.drivers.get(deviceId).connect();
       this.devices.recover(deviceId);
       const connected = this.devices.get(deviceId)!;
+      await this.drivers.applyStreamProfile(deviceId, connected.stream);
       this.events.append('DEVICE_CONNECTED', { deviceId, payload: { snapshot: toDeviceSummary(connected) } });
       this.publishChanges();
       return toDeviceSummary(connected);
@@ -206,6 +237,15 @@ export class ControlDaemon {
 
   applyStreamPolicy(command: { layout: 1 | 4 | 8 | 9 | 16 | 25 | 32; focusedId: string | null; fullscreenId: string | null; visibleDeviceIds: string[] }): void {
     this.sessions.applyStreamPolicy(command.layout, command.focusedId, command.fullscreenId, command.visibleDeviceIds);
+    this.devices.getAll().forEach(device => {
+      if (!device.configuration || device.configuration.driverMode === 'SIMULATED' || device.connection.state !== 'CONNECTED') return;
+      void this.drivers.applyStreamProfile(device.id, device.stream).catch(error => {
+        const message = error instanceof Error ? error.message : 'Stream profile update failed';
+        this.devices.setConnectionState(device.id, 'FAILED', message);
+        this.events.append('DEVICE_CONNECTION_FAILED', { deviceId: device.id, payload: { error: message } });
+        this.publishChanges();
+      });
+    });
     this.publishChanges();
   }
 

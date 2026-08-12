@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { AndroidAdbScrcpyDriver } from '../domain/androidDeviceDriver';
 import { ControlDaemon } from './controlDaemon';
 
 const daemons: ControlDaemon[] = [];
@@ -27,6 +28,19 @@ afterEach(async () => {
 });
 
 describe('Control Daemon HTTP/SSE protocol', () => {
+  it('keeps native drivers disabled by default and requires explicit real-device identifiers', () => {
+    const daemon = new ControlDaemon({ healthCheckIntervalMs: 0 });
+    expect(daemon.discovery.discover().every(candidate => candidate.simulated)).toBe(true);
+    expect(() => new ControlDaemon({ realDevices: true, driverMode: 'ANDROID_ADB_SCRCPY', healthCheckIntervalMs: 0 })).toThrow('androidSerial');
+  });
+
+  it('binds an explicitly configured Android driver to device-01 and keeps other sessions simulated', () => {
+    const daemon = new ControlDaemon({ realDevices: true, driverMode: 'ANDROID_ADB_SCRCPY', androidSerial: 'serial-01', healthCheckIntervalMs: 0 });
+    expect(daemon.drivers.get('device-01')).toBeInstanceOf(AndroidAdbScrcpyDriver);
+    expect(daemon.discovery.getByDeviceId('device-01')?.simulated).toBe(false);
+    expect(daemon.discovery.getByDeviceId('device-03')?.simulated).toBe(true);
+  });
+
   it('exposes 32 lightweight devices and preserves session identity across reload-like fetches', async () => {
     const { baseUrl } = await start();
     const first = await json(baseUrl, '/api/runtime');

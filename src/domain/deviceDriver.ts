@@ -1,4 +1,4 @@
-import type { DeviceHealth, DeviceSession, Platform } from './types';
+import type { DeviceHealth, DeviceSession, Platform, StreamProfile } from './types';
 
 export interface ScreenshotRequest {
   purpose: 'AI' | 'MONITOR';
@@ -21,6 +21,7 @@ export interface DeviceDriverAdapter {
   restartApp(appId: string, signal?: AbortSignal): Promise<void>;
   performGoalStep(goal: string, signal?: AbortSignal): Promise<void>;
   health(signal?: AbortSignal): Promise<DeviceHealth>;
+  applyStreamProfile?(profile: StreamProfile): Promise<void> | void;
 }
 
 export class DriverRegistry {
@@ -35,6 +36,14 @@ export class DriverRegistry {
     const driver = this.drivers.get(deviceId);
     if (!driver) throw new Error(`No driver registered for ${deviceId}`);
     return driver;
+  }
+
+  async disconnectAll(): Promise<void> {
+    await Promise.allSettled(Array.from(this.drivers.values()).map(driver => driver.disconnect()));
+  }
+
+  async applyStreamProfile(deviceId: string, profile: StreamProfile): Promise<void> {
+    await this.get(deviceId).applyStreamProfile?.(profile);
   }
 }
 

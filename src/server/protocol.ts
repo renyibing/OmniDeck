@@ -13,6 +13,7 @@ import type {
   TaskContext,
   TaskInstance,
   TimelineEvent,
+  DriverMode,
 } from '../domain/types';
 import type { DeviceConfiguration, DeviceConnection } from '../domain/types';
 import type { DiscoveredDevice } from '../domain/deviceDiscovery';
@@ -147,7 +148,9 @@ export const deviceConfigurationSchema = z.object({
   appId: z.string().trim().min(1).max(240),
   transport: z.enum(['ADB', 'XCUITEST']),
   orientation: z.literal('PORTRAIT'),
+  driverMode: z.enum(['SIMULATED', 'ANDROID_ADB_SCRCPY', 'IOS_XCUITEST']).default('SIMULATED'),
   wdaBundleId: z.string().trim().max(240).optional(),
+  wdaUrl: z.string().url().max(500).optional(),
 });
 
 export const configureDeviceCommandSchema = commandBase.extend({

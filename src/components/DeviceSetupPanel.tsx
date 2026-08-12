@@ -34,7 +34,7 @@ export function DeviceSetupPanel(props: Props) {
         <button className="setup-detect" onClick={props.onDiscover} disabled={props.discoveryState === 'detecting'}><Radar size={15}/>{props.discoveryState === 'detecting' ? 'Detecting...' : 'Detect devices'}</button>
         <span className={`setup-state ${props.discoveryState}`}><i/>{props.discoveryState === 'idle' ? 'Not scanned' : props.discoveryState === 'detecting' ? 'Scanning host' : props.discoveryState === 'ready' ? `${props.candidates.length} candidates` : 'Detection failed'}</span>
       </div>
-      <div className="setup-note">Simulation mode · no ADB or XCUITest commands are executed</div>
+      <div className="setup-note">{props.candidates.some(candidate => !candidate.simulated) ? 'Native mode · commands run only for the explicit serial or UDID' : 'Simulation mode · no ADB or XCUITest commands are executed'}</div>
       <div className="setup-list">
         {(['ANDROID', 'IOS'] as const).map(platform => <section className="candidate-section" key={platform}>
           <div className="candidate-heading"><Smartphone size={14}/><strong>{platform === 'ANDROID' ? 'Android' : 'iOS'}</strong><span>{props.candidates.filter(item => item.platform === platform).length}</span></div>
@@ -54,12 +54,13 @@ function CandidateCard({ candidate, device, onConfigure, onConnect }: { candidat
   const configuration: DeviceConfigurationDTO = {
     deviceId: candidate.deviceId, platform: candidate.platform, name: form.name, identifier: form.identifier,
     appId: form.appId, transport: candidate.transport, orientation: 'PORTRAIT',
+    driverMode: candidate.driverMode,
     ...(candidate.platform === 'IOS' ? { wdaBundleId: form.wdaBundleId } : {}),
   };
   const connectionState = device?.connection.state ?? 'DISCONNECTED';
   return <article className={`candidate-card ${candidate.platform.toLowerCase()}`}>
     <div className="candidate-meta"><div><strong>{candidate.name}</strong><span>{candidate.model} · {candidate.identifier}</span></div><span className={`auth-state ${candidate.authorization.toLowerCase()}`}><i/>{candidate.authorization.replace('_', ' ')}</span></div>
-    <div className="candidate-chips"><span>{candidate.transport}</span><span>PORTRAIT</span><span>SIMULATED</span></div>
+    <div className="candidate-chips"><span>{candidate.transport}</span><span>PORTRAIT</span><span>{candidate.simulated ? 'SIMULATED' : candidate.driverMode}</span></div>
     <div className="setup-form">
       <label>Device name<input value={form.name} onChange={event => update('name', event.target.value)}/></label>
       <label>{candidate.platform === 'ANDROID' ? 'Serial' : 'UDID'}<input value={form.identifier} onChange={event => update('identifier', event.target.value)}/></label>

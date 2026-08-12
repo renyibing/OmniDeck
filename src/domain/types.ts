@@ -7,6 +7,7 @@ export type TaskStatus = 'IDLE' | 'WAITING' | 'RUNNING' | 'SUCCESS' | 'FAILED' |
 export type HealthState = 'HEALTHY' | 'DEGRADED' | 'OFFLINE';
 export type StreamMode = 'BACKGROUND' | 'PREVIEW' | 'FOCUSED' | 'FULLSCREEN';
 export type DeviceConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'FAILED';
+export type DriverMode = 'SIMULATED' | 'ANDROID_ADB_SCRCPY' | 'IOS_XCUITEST';
 
 export interface DeviceMetrics {
   fps: number;
@@ -87,7 +88,9 @@ export interface DeviceConfiguration {
   appId: string;
   transport: 'ADB' | 'XCUITEST';
   orientation: 'PORTRAIT';
+  driverMode: DriverMode;
   wdaBundleId?: string;
+  wdaUrl?: string;
   configuredAt: number;
 }
 
