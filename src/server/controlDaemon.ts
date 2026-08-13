@@ -22,6 +22,8 @@ import {
   inputTextCommandSchema,
   launchAppCommandSchema,
   longPressCommandSchema,
+  pressKeyCommandSchema,
+  scrollWheelCommandSchema,
   protocolVersion,
   screenTapCommandSchema,
   streamPolicyCommandSchema,
@@ -272,6 +274,9 @@ export class ControlDaemon {
         this.desiredConnections.delete(deviceId);
         this.persistRuntimeState();
         break;
+      case 'clear-configuration':
+        await this.clearConfiguredDevice(deviceId);
+        break;
       case 'recover':
         await this.controlPlane.recover(deviceId);
         if (this.devices.get(deviceId)?.configuration?.driverMode === 'ANDROID_ADB_SCRCPY') {
@@ -293,6 +298,10 @@ export class ControlDaemon {
     await this.controlPlane.tapDevice(deviceId, point, source);
   }
 
+  async executeScreenScroll(deviceId: string, point: { x: number; y: number }, deltaX: number, deltaY: number, source: 'INSPECTOR' | 'LIVE_PREVIEW' | 'FULLSCREEN_PREVIEW'): Promise<void> {
+    await this.controlPlane.scrollWheelDevice(deviceId, { point, deltaX, deltaY }, source);
+  }
+
   async executeManualInput(action: string, deviceId: string, command: unknown): Promise<void> {
     switch (action) {
       case 'swipe': {
@@ -310,6 +319,11 @@ export class ControlDaemon {
         await this.controlPlane.inputTextDevice(deviceId, parsed.text, parsed.source);
         break;
       }
+      case 'press-key': {
+        const parsed = pressKeyCommandSchema.parse(command);
+        await this.controlPlane.pressKeyDevice(deviceId, parsed.key, parsed.source);
+        break;
+      }
       case 'back': await this.controlPlane.backDevice(deviceId); break;
       case 'home': await this.controlPlane.homeDevice(deviceId); break;
       default: throw new HttpError(404, `Unsupported manual action: ${action}`);
@@ -322,11 +336,45 @@ export class ControlDaemon {
 
   async discoverDevicesAsync() {
     const candidates = await this.discovery.discover();
+    if (this.discovery.usesHostDiscovery()) {
+      await this.cleanupAbsentConfiguredDevices(candidates);
+    }
     candidates.forEach(candidate => this.events.append('DEVICE_DISCOVERED', {
       deviceId: candidate.deviceId,
       payload: { candidate: cloneSnapshot(candidate) },
     }));
     return candidates;
+  }
+
+  private async clearConfiguredDevice(deviceId: string): Promise<void> {
+    const session = this.devices.get(deviceId);
+    if (!session?.configuration) return;
+    this.desiredConnections.delete(deviceId);
+    this.previews.stop(deviceId);
+    await this.scrcpyVideos.stop(deviceId);
+    try {
+      await this.drivers.get(deviceId).disconnect();
+    } catch {
+      // Ignore cleanup failures for devices that are already gone.
+    }
+    this.devices.clearConfiguration(deviceId);
+    this.events.append('DEVICE_CONFIGURED', {
+      deviceId,
+      payload: { snapshot: toDeviceSummary(this.devices.get(deviceId)!), cleared: true },
+    });
+    this.persistRuntimeState();
+    this.publishChanges();
+  }
+
+  private async cleanupAbsentConfiguredDevices(detected: Awaited<ReturnType<DeviceDiscovery['discover']>>): Promise<void> {
+    const present = new Set(detected.map(candidate => `${candidate.platform}:${candidate.identifier}`));
+    const absent = this.devices.getAll().filter(session =>
+      session.configuration
+      && session.configuration.driverMode !== 'SIMULATED'
+      && !present.has(`${session.platform}:${session.configuration.identifier}`),
+    );
+    if (!absent.length) return;
+    await Promise.all(absent.map(session => this.clearConfiguredDevice(session.id)));
   }
 
   configureDevice(configuration: Omit<Parameters<DeviceManager['configure']>[1], 'configuredAt'>): DeviceSummaryDTO {
@@ -639,7 +687,7 @@ export class ControlDaemon {
         return this.json(response, result.payload, result.status);
       }
 
-      const commandPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/(pause|resume|stop|retry|take-control|release-control|disconnect|recover|restart-app|launch-app|stop-app)$/);
+      const commandPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/(pause|resume|stop|retry|take-control|release-control|disconnect|clear-configuration|recover|restart-app|launch-app|stop-app)$/);
       if (request.method === 'POST' && commandPath) {
         const deviceId = this.decodeId(commandPath[1]);
         const action = commandPath[2];
@@ -675,7 +723,23 @@ export class ControlDaemon {
         return this.json(response, result.payload, result.status);
       }
 
-      const manualPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/(swipe|long-press|input-text|back|home)$/);
+      const scrollPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/scroll$/);
+      if (request.method === 'POST' && scrollPath) {
+        const deviceId = this.decodeId(scrollPath[1]);
+        const command = scrollWheelCommandSchema.parse(await this.body(request));
+        if (command.deviceId !== deviceId) throw new HttpError(400, 'deviceId does not match URL');
+        if (!this.devices.get(deviceId)) throw new HttpError(404, 'Device not found');
+        const result = await this.idempotent(command.commandId, command, async () => {
+          await this.executeScreenScroll(deviceId, command.point, command.deltaX, command.deltaY, command.source);
+          return {
+            status: 200,
+            payload: { version: protocolVersion, commandId: command.commandId, device: this.deviceSummary(deviceId) },
+          };
+        });
+        return this.json(response, result.payload, result.status);
+      }
+
+      const manualPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/(swipe|long-press|input-text|press-key|back|home)$/);
       if (request.method === 'POST' && manualPath) {
         const deviceId = this.decodeId(manualPath[1]);
         const action = manualPath[2];
@@ -686,7 +750,9 @@ export class ControlDaemon {
             ? longPressCommandSchema.parse(rawBody)
             : action === 'input-text'
               ? inputTextCommandSchema.parse(rawBody)
-              : deviceCommandSchema.parse(rawBody);
+              : action === 'press-key'
+                ? pressKeyCommandSchema.parse(rawBody)
+                : deviceCommandSchema.parse(rawBody);
         if (command.deviceId !== deviceId) throw new HttpError(400, 'deviceId does not match URL');
         if (!this.devices.get(deviceId)) throw new HttpError(404, 'Device not found');
         const result = await this.idempotent(command.commandId, { action, ...command }, async () => {

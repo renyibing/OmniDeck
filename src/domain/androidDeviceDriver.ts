@@ -1,5 +1,5 @@
 import type { DeviceHealth, StreamProfile } from './types';
-import type { DeviceDriverAdapter, LongPressRequest, MonitorFrame, NormalizedPoint, ScreenshotRequest, ScreenshotResult, SwipeRequest } from './deviceDriver';
+import type { DeviceDriverAdapter, LongPressRequest, MonitorFrame, NormalizedPoint, ScreenshotRequest, ScreenshotResult, SwipeRequest, DevicePressKey } from './deviceDriver';
 import { parseUiAutomatorXml, type UiHierarchy } from './androidUiHierarchy';
 import { NativeToolError, ProcessRunner } from './nativeProcess';
 import { encodeRgbaPng } from './pngEncoder';
@@ -127,6 +127,13 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
     await this.shell(['input', 'text', encodeAdbInputText(text)], signal);
   }
 
+  async pressKey(key: DevicePressKey, signal?: AbortSignal): Promise<void> {
+    this.requireConnected();
+    const code = ANDROID_KEYCODES[key];
+    if (!code) throw new Error(`Unsupported key for Android: ${key}`);
+    await this.shell(['input', 'keyevent', code], signal);
+  }
+
   async back(signal?: AbortSignal): Promise<void> { await this.shell(['input', 'keyevent', 'KEYCODE_BACK'], signal); }
   async home(signal?: AbortSignal): Promise<void> { await this.shell(['input', 'keyevent', 'KEYCODE_HOME'], signal); }
 
@@ -216,3 +223,14 @@ export function encodeAdbInputText(text: string): string {
     .replace(/\s/g, '%s')
     .replace(/([&<>;|()*~"'`$])/g, '\\$1');
 }
+
+const ANDROID_KEYCODES: Record<DevicePressKey, string> = {
+  Enter: 'KEYCODE_ENTER',
+  Backspace: 'KEYCODE_DEL',
+  Delete: 'KEYCODE_FORWARD_DEL',
+  Tab: 'KEYCODE_TAB',
+  ArrowUp: 'KEYCODE_DPAD_UP',
+  ArrowDown: 'KEYCODE_DPAD_DOWN',
+  ArrowLeft: 'KEYCODE_DPAD_LEFT',
+  ArrowRight: 'KEYCODE_DPAD_RIGHT',
+};

@@ -67,7 +67,7 @@ export class IOSWdaDiagnostics {
     this.runner = options.runner ?? new ProcessRunner();
     this.request = options.request ?? fetch;
     this.probe = options.probeLocalPort ?? probeLocalPort;
-    this.timeoutMs = options.timeoutMs ?? 1_500;
+    this.timeoutMs = options.timeoutMs ?? 4_000;
   }
 
   async diagnose(input: IOSWdaDiagnosticsInput): Promise<IOSWdaStatus> {
@@ -131,7 +131,7 @@ export class IOSWdaDiagnostics {
     const failureState = classifyWdaFailure(status.error) === 'SIGNING_REQUIRED'
       || signingState === 'SIGNING_REQUIRED'
       ? 'SIGNING_REQUIRED'
-      : isForwardReset(status.error)
+      : isWdaUnreachable(status.error)
         ? 'WDA_NOT_RUNNING'
         : 'UNKNOWN';
     return this.status(input, endpoint, {
@@ -141,9 +141,11 @@ export class IOSWdaDiagnostics {
       lastError: status.error,
       nextAction: failureState === 'SIGNING_REQUIRED'
         ? 'Resolve Xcode signing/provisioning for WebDriverAgentRunner, then rerun WDA and retry connection.'
-        : commands.xcodebuild
-          ? `Keep iproxy running and start WebDriverAgentRunner for this UDID. Command: ${commands.xcodebuild}`
-          : 'Keep iproxy running and start WebDriverAgentRunner for this UDID, then retry WDA status.',
+        : failureState === 'WDA_NOT_RUNNING' && /timed out/i.test(status.error ?? '')
+          ? 'iproxy is listening but WDA is not responding (still starting or overloaded). Restart WDA: ./scripts/stop-wda-device.sh then ./scripts/start-wda-device.sh for this UDID/port. Unlock the device and close heavy foreground apps before retrying.'
+          : commands.xcodebuild
+            ? `Keep iproxy running and start WebDriverAgentRunner for this UDID. Command: ${commands.xcodebuild}`
+            : 'Keep iproxy running and start WebDriverAgentRunner for this UDID, then retry WDA status.',
       commands,
     });
   }
@@ -250,6 +252,11 @@ function makeCommands(udid: string | null, localPort: number | null, bundleId: s
 
 function isForwardReset(error: string | null): boolean {
   return classifyWdaFailure(error) === 'WDA_NOT_RUNNING';
+}
+
+function isWdaUnreachable(error: string | null): boolean {
+  if (!error) return false;
+  return isForwardReset(error) || /timed out|abort/i.test(error);
 }
 
 function describeCause(cause: unknown): string | null {

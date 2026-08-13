@@ -23,6 +23,23 @@ export interface LongPressRequest {
   durationMs?: number;
 }
 
+/** Mouse wheel delta anchored at a normalized screen point. */
+export interface ScrollWheelRequest {
+  point: NormalizedPoint;
+  deltaX: number;
+  deltaY: number;
+}
+
+export type DevicePressKey =
+  | 'Enter'
+  | 'Backspace'
+  | 'Delete'
+  | 'Tab'
+  | 'ArrowUp'
+  | 'ArrowDown'
+  | 'ArrowLeft'
+  | 'ArrowRight';
+
 export interface DeviceScreenSize {
   width: number;
   height: number;
@@ -51,8 +68,10 @@ export interface DeviceDriverAdapter {
   getScreenSize(signal?: AbortSignal): Promise<DeviceScreenSize>;
   tap(point: NormalizedPoint, signal?: AbortSignal): Promise<void>;
   swipe(request: SwipeRequest, signal?: AbortSignal): Promise<void>;
+  scrollWheel?(request: ScrollWheelRequest, signal?: AbortSignal): Promise<void>;
   longPress(request: LongPressRequest, signal?: AbortSignal): Promise<void>;
   inputText(text: string, signal?: AbortSignal): Promise<void>;
+  pressKey(key: DevicePressKey, signal?: AbortSignal): Promise<void>;
   back(signal?: AbortSignal): Promise<void>;
   home(signal?: AbortSignal): Promise<void>;
   launchApp(appId: string, signal?: AbortSignal): Promise<void>;
@@ -149,6 +168,7 @@ export class SimulatedDeviceDriver implements DeviceDriverAdapter {
   async swipe(_request: SwipeRequest, signal?: AbortSignal): Promise<void> { await this.requireConnection(signal); }
   async longPress(_request: LongPressRequest, signal?: AbortSignal): Promise<void> { await this.requireConnection(signal); }
   async inputText(_text: string, signal?: AbortSignal): Promise<void> { await this.requireConnection(signal); }
+  async pressKey(_key: DevicePressKey, signal?: AbortSignal): Promise<void> { await this.requireConnection(signal); }
   async back(signal?: AbortSignal): Promise<void> { await this.requireConnection(signal); }
   async home(signal?: AbortSignal): Promise<void> { await this.requireConnection(signal); }
   async launchApp(_appId: string, signal?: AbortSignal): Promise<void> { await this.requireConnection(signal); }

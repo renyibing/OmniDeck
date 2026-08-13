@@ -1,5 +1,5 @@
-import { CheckCircle2, CircleAlert, PlugZap, Radar, RefreshCw, Smartphone, X } from 'lucide-react';
-import { useState } from 'react';
+import { CheckCircle2, CircleAlert, PlugZap, Radar, RefreshCw, Smartphone, Unplug, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import type { DeviceConfigurationDTO, DiscoveredDeviceDTO, IOSWdaStatusDTO } from '../server/protocol';
 
 interface Props {
@@ -12,6 +12,7 @@ interface Props {
   onDiscover: () => void;
   onConfigure: (configuration: DeviceConfigurationDTO) => void;
   onConnect: (deviceId: string) => void;
+  onDisconnect: (deviceId: string) => void;
   onRefreshWda: (deviceId: string) => void;
 }
 
@@ -41,18 +42,25 @@ export function DeviceSetupPanel(props: Props) {
       <div className="setup-list">
         {(['ANDROID', 'IOS'] as const).map(platform => <section className="candidate-section" key={platform}>
           <div className="candidate-heading"><Smartphone size={14}/><strong>{platform === 'ANDROID' ? 'Android' : 'iOS'}</strong><span>{props.candidates.filter(item => item.platform === platform).length}</span></div>
-          {props.candidates.filter(item => item.platform === platform).map(candidate => <CandidateCard key={candidate.candidateId} candidate={candidate} device={props.devices.find(item => item.id === candidate.deviceId)} wdaStatus={props.wdaStatuses[candidate.deviceId]} onConfigure={props.onConfigure} onConnect={props.onConnect} onRefreshWda={props.onRefreshWda}/>) }
-          {!props.candidates.some(item => item.platform === platform) && <div className="candidate-empty">Run detection to find a {platform === 'ANDROID' ? 'USB / ADB' : 'trusted XCUITest'} device.</div>}
+          {props.candidates.filter(item => item.platform === platform).map(candidate => <CandidateCard key={candidate.candidateId} candidate={candidate} device={props.devices.find(item => item.id === candidate.deviceId)} wdaStatus={props.wdaStatuses[candidate.deviceId]} onConfigure={props.onConfigure} onConnect={props.onConnect} onDisconnect={props.onDisconnect} onRefreshWda={props.onRefreshWda}/>) }
+          {props.discoveryState === 'ready' && !props.candidates.some(item => item.platform === platform) && <div className="candidate-empty">No connected {platform === 'ANDROID' ? 'USB / ADB' : 'trusted XCUITest'} devices found.</div>}
+          {props.discoveryState !== 'ready' && !props.candidates.some(item => item.platform === platform) && <div className="candidate-empty">Run detection to find a {platform === 'ANDROID' ? 'USB / ADB' : 'trusted XCUITest'} device.</div>}
         </section>)}
       </div>
     </aside>
   </div>;
 }
 
-function CandidateCard({ candidate, device, wdaStatus, onConfigure, onConnect, onRefreshWda }: { candidate: DiscoveredDeviceDTO; device?: Props['devices'][number]; wdaStatus?: IOSWdaStatusDTO; onConfigure: Props['onConfigure']; onConnect: Props['onConnect']; onRefreshWda: Props['onRefreshWda'] }) {
+function CandidateCard({ candidate, device, wdaStatus, onConfigure, onConnect, onDisconnect, onRefreshWda }: { candidate: DiscoveredDeviceDTO; device?: Props['devices'][number]; wdaStatus?: IOSWdaStatusDTO; onConfigure: Props['onConfigure']; onConnect: Props['onConnect']; onDisconnect: Props['onDisconnect']; onRefreshWda: Props['onRefreshWda'] }) {
   const configured = device?.configuration;
   const [form, setForm] = useState<FormState>(() => initialForm(candidate, configured));
   const [dirty, setDirty] = useState(false);
+  const identifierMismatch = Boolean(configured && configured.identifier !== candidate.identifier);
+  useEffect(() => {
+    if (!identifierMismatch) return;
+    setForm(current => ({ ...current, identifier: candidate.identifier, name: candidate.name }));
+    setDirty(true);
+  }, [candidate.identifier, candidate.name, identifierMismatch]);
   const update = (key: string, value: string) => { setDirty(true); setForm(current => ({ ...current, [key]: value })); };
   const configuration: DeviceConfigurationDTO = {
     deviceId: candidate.deviceId, platform: candidate.platform, name: form.name, identifier: form.identifier,
@@ -77,10 +85,12 @@ function CandidateCard({ candidate, device, wdaStatus, onConfigure, onConnect, o
       <p>{wdaStatus?.nextAction ?? (configured ? 'Check WDA before connecting.' : 'Save this iOS configuration before connecting.')}</p>
       {wdaStatus?.commands.iproxy && <code>{wdaStatus.commands.iproxy}</code>}
     </div>}
+    {identifierMismatch && <div className="connection-error"><CircleAlert size={13}/>Detected {candidate.platform === 'ANDROID' ? 'serial' : 'UDID'} changed ({configured?.identifier} → {candidate.identifier}). Save config before connecting.</div>}
     <div className="candidate-actions">
       <span className={`connection-state ${connectionState.toLowerCase()}`}><i/>{connectionState}</span>
       <button onClick={() => onConfigure(configuration)} disabled={!form.name || !form.identifier || !form.appId || (candidate.platform === 'IOS' && !candidate.simulated && !form.wdaUrl) || (!dirty && Boolean(configured))}><CheckCircle2 size={14}/>{configured && !dirty ? 'Configured' : 'Save config'}</button>
       <button className="connect-action" onClick={() => onConnect(candidate.deviceId)} disabled={!configured || connectionState === 'CONNECTING'}><PlugZap size={14}/>{connectionState === 'CONNECTING' ? 'Connecting...' : 'Connect'}</button>
+      {configured && <button onClick={() => onDisconnect(candidate.deviceId)} title="Disconnect and clear saved configuration"><Unplug size={14}/>Disconnect</button>}
     </div>
     {connectionState === 'FAILED' && device?.connection.error && <div className="connection-error"><CircleAlert size={13}/>{device.connection.error}</div>}
   </article>;

@@ -47,6 +47,31 @@ describe('host device discovery', () => {
     expect(candidates.find(candidate => candidate.identifier === 'fallback-udid')).toMatchObject({ name: 'Fallback iPhone', authorization: 'AUTHORIZED' });
     expect(runner.run).toHaveBeenCalledWith(expect.objectContaining({ args: ['xcdevice', 'list'] }));
   });
+
+  it('drops host bindings and static seeds that are not currently attached', async () => {
+    const devices = new DeviceManager(8);
+    const runner = {
+      run: vi.fn(async ({ command, args }: { command: string; args: string[] }) => {
+        if (command === 'adb') return { code: 0, stdout: 'List of devices attached\n', stderr: '' };
+        if (args[0] === 'devicectl') return { code: 0, stdout: JSON.stringify({ result: { devices: [] } }), stderr: '' };
+        return { code: 0, stdout: '[]', stderr: '' };
+      }),
+    } as unknown as ProcessRunner;
+    const discovery = new DeviceDiscovery(devices, {
+      hostDiscovery: true,
+      runner,
+      nativeCandidates: [{
+        deviceId: 'device-01',
+        platform: 'ANDROID',
+        identifier: 'android-01',
+        driverMode: 'ANDROID_ADB_SCRCPY',
+      }],
+    });
+
+    const candidates = await discovery.discover();
+
+    expect(candidates).toHaveLength(0);
+  });
 });
 
 function iosConfiguration(deviceId: string, identifier: string, name: string) {

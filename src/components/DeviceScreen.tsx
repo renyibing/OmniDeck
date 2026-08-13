@@ -1,18 +1,40 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BatteryMedium, Radio, Wifi, WifiOff } from 'lucide-react';
 import type { DeviceSummaryDTO } from '../server/protocol';
-import type { ScreenTapPoint } from '../app/controlCenterClient';
+import type { DevicePressKey, ScreenTapPoint } from '../app/controlCenterClient';
 import { subscribeDeviceFrame } from '../app/deviceFrameStore';
 import { projectCanvasPoint, useDeviceVideoStream } from '../app/useDeviceVideoStream';
+import { useDeviceScreenGestures } from '../app/useDeviceScreenGestures';
 
 interface Props {
   device: DeviceSummaryDTO;
   fallback: 'tile' | 'inspector' | 'fullscreen';
   canControl?: boolean;
+  keyboardEnabled?: boolean;
+  keyboardSurface?: 'local';
+  onControlActivate?: () => void;
   onTap?: (point: ScreenTapPoint) => void;
+  onSwipe?: (from: ScreenTapPoint, to: ScreenTapPoint) => void;
+  onLongPress?: (point: ScreenTapPoint) => void;
+  onScroll?: (point: ScreenTapPoint, deltaX: number, deltaY: number) => void;
+  onInputText?: (text: string) => void;
+  onPressKey?: (key: DevicePressKey) => void;
 }
 
-export function DeviceScreen({ device, fallback, canControl = false, onTap }: Props) {
+export function DeviceScreen({
+  device,
+  fallback,
+  canControl = false,
+  keyboardEnabled,
+  keyboardSurface,
+  onControlActivate,
+  onTap,
+  onSwipe,
+  onLongPress,
+  onScroll,
+  onInputText,
+  onPressKey,
+}: Props) {
   const [mjpegFailed, setMjpegFailed] = useState(false);
   const [videoFailed, setVideoFailed] = useState(false);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -48,25 +70,38 @@ export function DeviceScreen({ device, fallback, canControl = false, onTap }: Pr
     });
   }, [device.id, device.stream.fps, fallback, usePolling]);
 
-  const handleTap = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!onTap || !canControl) return;
-    event.stopPropagation();
-    const point = showVideoSurface && useVideo
-      ? canvasRef.current ? projectCanvasPoint(canvasRef.current, event.clientX, event.clientY) : null
-      : imageRef.current ? projectPoint(imageRef.current, event.clientX, event.clientY) : null;
-    if (!point) return;
-    onTap(point);
-  };
+  const interactive = Boolean(canControl && (onTap || onSwipe || onLongPress || onScroll || onInputText || onPressKey));
+  const showHint = Boolean((onTap || onSwipe || onLongPress || onScroll || onInputText || onPressKey) && !canControl && fallback !== 'tile');
 
-  const interactive = Boolean(onTap && canControl);
-  const showHint = Boolean(onTap && !canControl && fallback !== 'tile');
+  const projectScreenPoint = useCallback((clientX: number, clientY: number): ScreenTapPoint | null => {
+    if (showVideoSurface && canvasRef.current) {
+      const point = projectCanvasPoint(canvasRef.current, clientX, clientY);
+      if (point) return point;
+    }
+    if (imageRef.current) {
+      const point = projectPoint(imageRef.current, clientX, clientY);
+      if (point) return point;
+    }
+    return null;
+  }, [showVideoSurface]);
+
+  const gestureHandlers = useMemo(() => ({
+    onTap, onSwipe, onLongPress, onScroll, onInputText, onPressKey,
+  }), [onInputText, onLongPress, onPressKey, onScroll, onSwipe, onTap]);
+  const controlSurface = useDeviceScreenGestures(interactive, projectScreenPoint, gestureHandlers, {
+    keyboardEnabled: keyboardEnabled ?? interactive,
+    onActivate: onControlActivate,
+  });
+  const { viewportRef, ...controlProps } = controlSurface;
+  const keyboardSurfaceProps = keyboardSurface === 'local' ? { 'data-keyboard-surface': 'local' as const } : {};
+  const controlHint = 'Tap · swipe · scroll · type';
 
   if (device.livePreview && showVideoSurface) {
     return <div className={`device-screen real-screen ${interactive ? 'interactive control-ready' : ''} ${showHint ? 'control-locked' : ''}`}>
-      <div className={`screen-fit-viewport ${fallback}`} onClick={interactive ? handleTap : undefined}>
+      <div ref={viewportRef} className={`screen-fit-viewport ${fallback}`} {...controlProps} {...keyboardSurfaceProps}>
         <canvas ref={canvasRef} className="device-video-canvas" aria-label={`${device.name} live screen`}/>
       </div>
-      {interactive && <div className="screen-control-layer"><span>Tap to control · H.264 stream</span></div>}
+      {interactive && <div className="screen-control-layer"><span>{controlHint} · H.264 stream</span></div>}
       {showHint && <div className="screen-control-hint"><span>Take control to interact</span></div>}
       <span className="real-live-badge"><i/>{useVideo ? 'LIVE H.264' : 'CONNECTING'}</span>
     </div>;
@@ -74,7 +109,7 @@ export function DeviceScreen({ device, fallback, canControl = false, onTap }: Pr
 
   if (device.livePreview && (useMjpeg || usePolling)) {
     return <div className={`device-screen real-screen ${interactive ? 'interactive control-ready' : ''} ${showHint ? 'control-locked' : ''}`}>
-      <div className={`screen-fit-viewport ${fallback}`} onClick={interactive ? handleTap : undefined}>
+      <div ref={viewportRef} className={`screen-fit-viewport ${fallback}`} {...controlProps} {...keyboardSurfaceProps}>
         <img
           ref={imageRef}
           src={useMjpeg ? mjpegUrl! : undefined}
@@ -86,7 +121,7 @@ export function DeviceScreen({ device, fallback, canControl = false, onTap }: Pr
           }}
         />
       </div>
-      {interactive && <div className="screen-control-layer"><span>Tap to control · Full screen fitted</span></div>}
+      {interactive && <div className="screen-control-layer"><span>{controlHint} · Full screen fitted</span></div>}
       {showHint && <div className="screen-control-hint"><span>Take control to interact</span></div>}
       <span className="real-live-badge"><i/>LIVE</span>
     </div>;

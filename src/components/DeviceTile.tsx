@@ -1,7 +1,7 @@
 import { BatteryMedium, Bot, Check, Cpu, GripVertical, Radio, Thermometer, Wifi, WifiOff } from 'lucide-react';
 import type { DeviceSummaryDTO } from '../server/protocol';
 import { DeviceScreen } from './DeviceScreen';
-import type { ScreenTapPoint } from '../app/controlCenterClient';
+import type { DevicePressKey, ScreenTapPoint } from '../app/controlCenterClient';
 
 interface Props {
   device: DeviceSummaryDTO;
@@ -14,6 +14,12 @@ interface Props {
   onToggle: () => void;
   onOpen: () => void;
   onTap: (point: ScreenTapPoint) => void;
+  onSwipe: (from: ScreenTapPoint, to: ScreenTapPoint) => void;
+  onLongPress: (point: ScreenTapPoint) => void;
+  onScroll: (point: ScreenTapPoint, deltaX: number, deltaY: number) => void;
+  onInputText: (text: string) => void;
+  onPressKey: (key: DevicePressKey) => void;
+  onFocusDevice: () => void;
   onDragStart: (event: React.DragEvent) => void;
   onDragOver: (event: React.DragEvent) => void;
   onDrop: (event: React.DragEvent) => void;
@@ -22,7 +28,7 @@ interface Props {
 
 const agentLabel: Record<DeviceSummaryDTO['agentStatus'], string> = { IDLE: 'IDLE', WAITING: 'WAITING', RUNNING: 'AI RUNNING', PAUSED: 'PAUSED', HUMAN_CONTROL: 'HUMAN', ERROR: 'ERROR' };
 
-export function DeviceTile({ device, selected, focused, dense, dragging, dropTarget, onSelect, onToggle, onOpen, onTap, onDragStart, onDragOver, onDrop, onDragEnd }: Props) {
+export function DeviceTile({ device, selected, focused, dense, dragging, dropTarget, onSelect, onToggle, onOpen, onTap, onSwipe, onLongPress, onScroll, onInputText, onPressKey, onFocusDevice, onDragStart, onDragOver, onDrop, onDragEnd }: Props) {
   const stateClass = device.status === 'OFFLINE' ? 'offline' : device.agentStatus === 'RUNNING' ? 'running' : device.agentStatus === 'HUMAN_CONTROL' ? 'human' : device.status === 'ERROR' || device.health === 'DEGRADED' ? 'error' : 'idle';
   return <article className={`device-tile ${stateClass} ${selected ? 'selected' : ''} ${focused ? 'focused' : ''} ${dense ? 'dense' : ''} ${dragging ? 'dragging' : ''} ${dropTarget ? 'drop-target' : ''}`} onClick={onSelect} onDoubleClick={onOpen} onDragOver={onDragOver} onDrop={onDrop}>
     <div className="tile-topline">
@@ -33,7 +39,7 @@ export function DeviceTile({ device, selected, focused, dense, dragging, dropTar
       <span className={`online-state ${device.status.toLowerCase()}`}><i/>{device.status}</span>
     </div>
     <div className="screen-frame">
-      <DeviceScreen device={device} fallback="tile" canControl={device.agentStatus === 'HUMAN_CONTROL'} onTap={onTap}/>
+      <DeviceScreen device={device} fallback="tile" canControl={device.agentStatus === 'HUMAN_CONTROL'} keyboardEnabled={false} onControlActivate={onFocusDevice} onTap={onTap} onSwipe={onSwipe} onLongPress={onLongPress} onScroll={onScroll} onInputText={onInputText} onPressKey={onPressKey}/>
       <div className="stream-badge">{device.stream.width}p · {device.stream.fps} FPS</div>
       <div className={`agent-badge ${device.agentStatus.toLowerCase()}`}><Bot size={12}/>{agentLabel[device.agentStatus]}</div>
     </div>

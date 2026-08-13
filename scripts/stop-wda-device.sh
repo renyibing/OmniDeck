@@ -62,6 +62,7 @@ fi
 
 suffix="$(sanitize_suffix "${UDID}-${LOCAL_PORT}")"
 kill_pid_file "${OUTPUT_DIR}/${suffix}-iproxy.pid"
+kill_pid_file "${OUTPUT_DIR}/${suffix}-iproxy-mjpeg.pid"
 kill_pid_file "${OUTPUT_DIR}/${suffix}-xcodebuild.pid"
 
 if lsof -tiTCP:"${LOCAL_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then

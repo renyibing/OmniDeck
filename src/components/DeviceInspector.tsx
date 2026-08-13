@@ -1,4 +1,4 @@
-import type { ScreenTapPoint } from '../app/controlCenterClient';
+import type { DevicePressKey, ScreenTapPoint } from '../app/controlCenterClient';
 import { useState } from 'react';
 import { Activity, ArrowDown, ArrowUp, BatteryMedium, Bot, Cable, CirclePause, CirclePlay, Cpu, ExternalLink, Hand, Keyboard, ListTree, MousePointerClick, Radio, RefreshCw, RotateCcw, ScrollText, Smartphone, Thermometer, Wifi, X } from 'lucide-react';
 import type { DeviceDetailDTO, DeviceSummaryDTO, IOSWdaStatusDTO, UiHierarchyDTO } from '../server/protocol';
@@ -15,6 +15,11 @@ interface Props {
   onResume: (id: string) => void;
   onRetry: (id: string) => void;
   onTap: (id: string, point: ScreenTapPoint) => void;
+  onPreviewSwipe: (id: string, from: ScreenTapPoint, to: ScreenTapPoint) => void;
+  onPreviewLongPress: (id: string, point: ScreenTapPoint) => void;
+  onPreviewScroll: (id: string, point: ScreenTapPoint, deltaX: number, deltaY: number) => void;
+  onPreviewInputText: (id: string, text: string) => void;
+  onPreviewPressKey: (id: string, key: DevicePressKey) => void;
   onBack: (id: string) => void;
   onHome: (id: string) => void;
   onInputText: (id: string, text: string) => void;
@@ -28,7 +33,7 @@ interface Props {
   onRefreshWda: (id: string) => void;
 }
 
-export function DeviceInspector({ device, onClose, onFullscreen, onOffline, onTakeControl, onReleaseControl, onPause, onResume, onRetry, onTap, onBack, onHome, onInputText, onLongPress, onSwipe, onStopApp, onRefreshUiTree, uiTree, uiTreeLoading, wdaStatus, onRefreshWda }: Props) {
+export function DeviceInspector({ device, onClose, onFullscreen, onOffline, onTakeControl, onReleaseControl, onPause, onResume, onRetry, onTap, onPreviewSwipe, onPreviewLongPress, onPreviewScroll, onPreviewInputText, onPreviewPressKey, onBack, onHome, onInputText, onLongPress, onSwipe, onStopApp, onRefreshUiTree, uiTree, uiTreeLoading, wdaStatus, onRefreshWda }: Props) {
   const [text, setText] = useState('');
   if (!device) return <aside className="inspector empty-inspector"><Smartphone size={28}/><strong>No device selected</strong></aside>;
   const canControl = device.agentStatus === 'HUMAN_CONTROL';
@@ -36,7 +41,7 @@ export function DeviceInspector({ device, onClose, onFullscreen, onOffline, onTa
   return <aside className="inspector">
     <div className="inspector-head"><div><span>DEVICE INSPECTOR</span><strong>{device.name}</strong><small>{device.model} · {device.id}</small></div><button onClick={onClose} title="Close inspector"><X size={17}/></button></div>
     <div className="inspector-live">
-      <DeviceScreen device={device} fallback="inspector" canControl={canControl} onTap={point => onTap(device.id, point)}/>
+      <DeviceScreen device={device} fallback="inspector" canControl={canControl} keyboardSurface="local" onTap={point => onTap(device.id, point)} onSwipe={(from, to) => onPreviewSwipe(device.id, from, to)} onLongPress={point => onPreviewLongPress(device.id, point)} onScroll={(point, deltaX, deltaY) => onPreviewScroll(device.id, point, deltaX, deltaY)} onInputText={text => onPreviewInputText(device.id, text)} onPressKey={key => onPreviewPressKey(device.id, key)}/>
       <button className="takeover-button" onClick={() => (device.agentStatus === 'HUMAN_CONTROL' ? onReleaseControl(device.id) : onTakeControl(device.id))}><Hand size={15}/> {device.agentStatus === 'HUMAN_CONTROL' ? 'Release control' : 'Take control'}</button>
       <button className="open-live" onClick={() => onFullscreen(device.id)} title="Open large view"><ExternalLink size={16}/></button>
     </div>

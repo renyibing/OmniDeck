@@ -75,6 +75,17 @@ export class DeviceManager {
     }));
   }
 
+  clearConfiguration(id: string): DeviceSession | undefined {
+    const slot = Number(id.replace('device-', ''));
+    return this.update(id, session => ({
+      ...session,
+      name: `${session.platform === 'IOS' ? 'iPhone' : 'Android'} ${String(Number.isFinite(slot) ? slot : id.slice(-2)).padStart(2, '0')}`,
+      configuration: null,
+      deviceDriver: { ...session.deviceDriver, connected: false },
+      connection: { state: 'DISCONNECTED', lastAttemptAt: null, connectedAt: null, error: null },
+    }));
+  }
+
   setConnectionState(id: string, state: DeviceConnectionState, error: string | null = null): void {
     this.update(id, session => ({
       ...session,

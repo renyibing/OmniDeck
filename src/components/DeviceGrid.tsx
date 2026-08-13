@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { LayoutSize } from '../domain';
 import type { DeviceSummaryDTO } from '../server/protocol';
 import { DeviceTile } from './DeviceTile';
-import type { ScreenTapPoint } from '../app/controlCenterClient';
+import type { DevicePressKey, ScreenTapPoint } from '../app/controlCenterClient';
 
 interface Props {
   devices: DeviceSummaryDTO[];
@@ -13,10 +13,16 @@ interface Props {
   onToggle: (id: string) => void;
   onOpen: (id: string) => void;
   onTap: (id: string, point: ScreenTapPoint) => void;
+  onSwipe: (id: string, from: ScreenTapPoint, to: ScreenTapPoint) => void;
+  onLongPress: (id: string, point: ScreenTapPoint) => void;
+  onScroll: (id: string, point: ScreenTapPoint, deltaX: number, deltaY: number) => void;
+  onInputText: (id: string, text: string) => void;
+  onPressKey: (id: string, key: DevicePressKey) => void;
+  onFocusDevice: (id: string) => void;
   onReorder: (sourceId: string, targetId: string) => void;
 }
 
-export function DeviceGrid({ devices, layout, selectedIds, focusedId, onSelect, onToggle, onOpen, onTap, onReorder }: Props) {
+export function DeviceGrid({ devices, layout, selectedIds, focusedId, onSelect, onToggle, onOpen, onTap, onSwipe, onLongPress, onScroll, onInputText, onPressKey, onFocusDevice, onReorder }: Props) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
@@ -45,6 +51,12 @@ export function DeviceGrid({ devices, layout, selectedIds, focusedId, onSelect, 
       onToggle={() => onToggle(device.id)}
       onOpen={() => onOpen(device.id)}
       onTap={point => onTap(device.id, point)}
+      onSwipe={(from, to) => onSwipe(device.id, from, to)}
+      onLongPress={point => onLongPress(device.id, point)}
+      onScroll={(point, deltaX, deltaY) => onScroll(device.id, point, deltaX, deltaY)}
+      onInputText={text => onInputText(device.id, text)}
+      onPressKey={key => onPressKey(device.id, key)}
+      onFocusDevice={() => onFocusDevice(device.id)}
       onDragStart={event => beginDrag(device.id, event)}
       onDragOver={event => {
         if (!draggingId || draggingId === device.id) return;

@@ -145,6 +145,8 @@ export const normalizedPointSchema = z.object({
   y: z.number().finite().min(0).max(1),
 });
 
+export type ScreenInputSource = 'INSPECTOR' | 'LIVE_PREVIEW' | 'FULLSCREEN_PREVIEW';
+
 export const screenTapCommandSchema = deviceCommandSchema.extend({
   point: normalizedPointSchema,
   source: z.enum(['LIVE_PREVIEW', 'FULLSCREEN_PREVIEW']).default('LIVE_PREVIEW'),
@@ -154,18 +156,30 @@ export const swipeCommandSchema = deviceCommandSchema.extend({
   from: normalizedPointSchema,
   to: normalizedPointSchema,
   durationMs: z.number().int().min(0).max(5_000).default(350),
-  source: z.enum(['INSPECTOR', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
+  source: z.enum(['INSPECTOR', 'LIVE_PREVIEW', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
 });
 
 export const longPressCommandSchema = deviceCommandSchema.extend({
   point: normalizedPointSchema,
   durationMs: z.number().int().min(350).max(5_000).default(650),
-  source: z.enum(['INSPECTOR', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
+  source: z.enum(['INSPECTOR', 'LIVE_PREVIEW', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
 });
 
 export const inputTextCommandSchema = deviceCommandSchema.extend({
   text: z.string().min(1).max(2_000),
-  source: z.enum(['INSPECTOR', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
+  source: z.enum(['INSPECTOR', 'LIVE_PREVIEW', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
+});
+
+export const pressKeyCommandSchema = deviceCommandSchema.extend({
+  key: z.enum(['Enter', 'Backspace', 'Delete', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']),
+  source: z.enum(['INSPECTOR', 'LIVE_PREVIEW', 'FULLSCREEN_PREVIEW']).default('INSPECTOR'),
+});
+
+export const scrollWheelCommandSchema = deviceCommandSchema.extend({
+  point: normalizedPointSchema,
+  deltaX: z.number(),
+  deltaY: z.number(),
+  source: z.enum(['INSPECTOR', 'LIVE_PREVIEW', 'FULLSCREEN_PREVIEW']).default('LIVE_PREVIEW'),
 });
 
 export const streamPolicyCommandSchema = commandBase.extend({
@@ -209,6 +223,8 @@ export type ScreenTapCommand = z.infer<typeof screenTapCommandSchema>;
 export type SwipeCommand = z.infer<typeof swipeCommandSchema>;
 export type LongPressCommand = z.infer<typeof longPressCommandSchema>;
 export type InputTextCommand = z.infer<typeof inputTextCommandSchema>;
+export type PressKeyCommand = z.infer<typeof pressKeyCommandSchema>;
+export type ScrollWheelCommand = z.infer<typeof scrollWheelCommandSchema>;
 export type StreamPolicyCommand = z.infer<typeof streamPolicyCommandSchema>;
 
 export const cloneSnapshot = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;

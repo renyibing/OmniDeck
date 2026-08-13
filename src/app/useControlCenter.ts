@@ -1,11 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LAYOUTS, type DeviceGroup, type LayoutSize, type WorkspacePreset } from '../domain';
 import type { DeviceConfigurationDTO, DeviceDetailDTO, DeviceSummaryDTO, DiscoveredDeviceDTO, EventEnvelope, IOSWdaStatusDTO, RuntimeSnapshot, UiHierarchyDTO } from '../server/protocol';
-import { ControlCenterClient, type ConnectionState, type DeviceAction, type ScreenTapPoint } from './controlCenterClient';
+import { ControlCenterClient, type ConnectionState, type DeviceAction, type DevicePressKey, type ScreenInputSource, type ScreenTapPoint } from './controlCenterClient';
 import { reorderDeviceIds, sortDevicesForWall } from './deviceOrdering';
+import { swipeDurationMs, handleDeviceScreenKeyDown } from './useDeviceScreenGestures';
 
 function readJSON<T>(key: string, fallback: T): T {
   try { return JSON.parse(localStorage.getItem(key) ?? '') as T; } catch { return fallback; }
+}
+
+const INPUT_BATCH_MS = 50;
+
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 }
 
 const layoutForCount = (count: number): LayoutSize => LAYOUTS.find(size => size >= count) ?? 32;
@@ -48,6 +58,10 @@ export function useControlCenter() {
   const selectedId = fullscreenId ?? focusedId;
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const inputBuffersRef = useRef<Map<string, { text: string; source: ScreenInputSource }>>(new Map());
+  const inputFlushTimersRef = useRef<Map<string, number>>(new Map());
+  const previewCommandAbortersRef = useRef(new Map<string, AbortController>());
+  const previewTapChainsRef = useRef(new Map<string, Promise<void>>());
 
   const groups = useMemo(() => [...(runtime?.groups ?? []), ...customGroups], [runtime?.groups, customGroups]);
   const activeGroup = groups.find(group => group.id === groupId) ?? groups[0];
@@ -150,13 +164,120 @@ export function useControlCenter() {
     localStorage.setItem('omnideck.device-order', JSON.stringify(manualDeviceOrder));
   }, [manualDeviceOrder]);
 
+  const applyDeviceSnapshot = useCallback((snapshot: DeviceSummaryDTO) => {
+    setDevices(current => current.map(device => device.id === snapshot.id ? snapshot : device));
+    setDetailVersion(version => version + 1);
+  }, []);
+
+  const cancelPreviewCommands = useCallback((id: string) => {
+    const timer = inputFlushTimersRef.current.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      inputFlushTimersRef.current.delete(id);
+    }
+    inputBuffersRef.current.delete(id);
+    previewCommandAbortersRef.current.get(id)?.abort();
+    previewCommandAbortersRef.current.delete(id);
+    previewTapChainsRef.current.delete(id);
+  }, []);
+
+  const runPreviewCommand = useCallback((id: string, run: (signal: AbortSignal) => Promise<void>, fallback: string) => {
+    previewCommandAbortersRef.current.get(id)?.abort();
+    const controller = new AbortController();
+    previewCommandAbortersRef.current.set(id, controller);
+    void run(controller.signal)
+      .catch(error => {
+        if (isAbortError(error) || controller.signal.aborted) return;
+        const message = formatControlError(error, fallback);
+        if (message) setToast(message);
+      })
+      .finally(() => {
+        if (previewCommandAbortersRef.current.get(id) === controller) {
+          previewCommandAbortersRef.current.delete(id);
+        }
+      });
+  }, []);
+
+  const runTapCommand = useCallback((id: string, run: () => Promise<void>, fallback: string) => {
+    const previous = previewTapChainsRef.current.get(id) ?? Promise.resolve();
+    const next = previous.then(
+      () => run(),
+      () => run(),
+    ).catch(error => {
+      if (isAbortError(error)) return;
+      const message = formatControlError(error, fallback);
+      if (message) setToast(message);
+    });
+    previewTapChainsRef.current.set(id, next.then(() => undefined, () => undefined));
+  }, []);
+
   const sendAction = useCallback((id: string, action: DeviceAction, appId?: string) => {
-    void client.deviceAction(id, action, crypto.randomUUID(), appId).catch(error => setToast(error instanceof Error ? error.message : `${action} failed`));
-  }, [client]);
+    void client.deviceAction(id, action, crypto.randomUUID(), appId)
+      .then(applyDeviceSnapshot)
+      .catch(error => setToast(error instanceof Error ? error.message : `${action} failed`));
+  }, [applyDeviceSnapshot, client]);
+
+  const takeHumanControlDevice = useCallback((id: string) => {
+    cancelPreviewCommands(id);
+    void client.deviceAction(id, 'take-control')
+      .then(applyDeviceSnapshot)
+      .catch(error => setToast(error instanceof Error ? error.message : 'take-control failed'));
+  }, [applyDeviceSnapshot, cancelPreviewCommands, client]);
+
+  const releaseHumanControlDevice = useCallback((id: string) => {
+    cancelPreviewCommands(id);
+    void client.deviceAction(id, 'release-control')
+      .then(applyDeviceSnapshot)
+      .catch(error => setToast(error instanceof Error ? error.message : 'release-control failed'));
+  }, [applyDeviceSnapshot, cancelPreviewCommands, client]);
 
   const tapDevice = useCallback((id: string, point: ScreenTapPoint, source: 'LIVE_PREVIEW' | 'FULLSCREEN_PREVIEW' = 'LIVE_PREVIEW') => {
-    void client.tapDevice(id, point, source).catch(error => setToast(error instanceof Error ? error.message : 'Screen input failed'));
+    runTapCommand(id, () => client.tapDevice(id, point, source), 'Screen input failed');
+  }, [client, runTapCommand]);
+
+  const swipeDevice = useCallback((id: string, from: ScreenTapPoint, to: ScreenTapPoint, source: ScreenInputSource = 'LIVE_PREVIEW') => {
+    runPreviewCommand(id, signal => client.swipeDevice(id, { from, to, durationMs: swipeDurationMs(from, to) }, source, signal), 'Swipe failed');
+  }, [client, runPreviewCommand]);
+
+  const longPressDevice = useCallback((id: string, point: ScreenTapPoint, source: ScreenInputSource = 'LIVE_PREVIEW') => {
+    runPreviewCommand(id, signal => client.longPressDevice(id, point, 650, source, signal), 'Long press failed');
+  }, [client, runPreviewCommand]);
+
+  const scrollDevice = useCallback((id: string, point: ScreenTapPoint, deltaX: number, deltaY: number, source: ScreenInputSource = 'LIVE_PREVIEW') => {
+    runPreviewCommand(id, signal => client.scrollWheelDevice(id, point, deltaX, deltaY, source, signal), 'Scroll failed');
+  }, [client, runPreviewCommand]);
+
+  const flushPreviewInput = useCallback((id: string) => {
+    const timer = inputFlushTimersRef.current.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      inputFlushTimersRef.current.delete(id);
+    }
+    const buffered = inputBuffersRef.current.get(id);
+    if (!buffered?.text) return;
+    inputBuffersRef.current.delete(id);
+    void client.inputTextDevice(id, buffered.text, buffered.source, previewCommandAbortersRef.current.get(id)?.signal)
+      .catch(error => {
+        const message = formatControlError(error, 'Text input failed');
+        if (message) setToast(message);
+      });
   }, [client]);
+
+  const previewInputText = useCallback((id: string, text: string, source: ScreenInputSource = 'LIVE_PREVIEW') => {
+    const previous = inputBuffersRef.current.get(id);
+    inputBuffersRef.current.set(id, {
+      text: `${previous?.text ?? ''}${text}`,
+      source,
+    });
+    const existing = inputFlushTimersRef.current.get(id);
+    if (existing !== undefined) window.clearTimeout(existing);
+    inputFlushTimersRef.current.set(id, window.setTimeout(() => flushPreviewInput(id), INPUT_BATCH_MS));
+  }, [flushPreviewInput]);
+
+  const previewPressKey = useCallback((id: string, key: DevicePressKey, source: ScreenInputSource = 'LIVE_PREVIEW') => {
+    flushPreviewInput(id);
+    runPreviewCommand(id, signal => client.pressKeyDevice(id, key, source, signal), 'Key input failed');
+  }, [client, flushPreviewInput, runPreviewCommand]);
 
   const runManualCommand = useCallback((id: string, command: () => Promise<void>, fallback: string) => {
     void command().then(() => setDetailVersion(version => version + 1)).catch(error => setToast(error instanceof Error ? error.message : fallback));
@@ -165,7 +286,7 @@ export function useControlCenter() {
   const manualBack = useCallback((id: string) => runManualCommand(id, () => client.backDevice(id), 'Back failed'), [client, runManualCommand]);
   const manualHome = useCallback((id: string) => runManualCommand(id, () => client.homeDevice(id), 'Home failed'), [client, runManualCommand]);
   const manualInputText = useCallback((id: string, text: string) => runManualCommand(id, () => client.inputTextDevice(id, text), 'Text input failed'), [client, runManualCommand]);
-  const manualLongPress = useCallback((id: string, point: ScreenTapPoint = { x: 0.5, y: 0.5 }) => runManualCommand(id, () => client.longPressDevice(id, point), 'Long press failed'), [client, runManualCommand]);
+  const manualLongPress = useCallback((id: string, point: ScreenTapPoint = { x: 0.5, y: 0.5 }) => runManualCommand(id, () => client.longPressDevice(id, point, 650, 'INSPECTOR'), 'Long press failed'), [client, runManualCommand]);
   const manualStopApp = useCallback((id: string) => {
     const appId = devices.find(device => device.id === id)?.currentApp ?? 'Omni Market';
     runManualCommand(id, () => client.stopAppDevice(id, appId), 'Stop app failed');
@@ -174,7 +295,7 @@ export function useControlCenter() {
     const input = direction === 'UP'
       ? { from: { x: 0.5, y: 0.78 }, to: { x: 0.5, y: 0.28 }, durationMs: 360 }
       : { from: { x: 0.5, y: 0.28 }, to: { x: 0.5, y: 0.78 }, durationMs: 360 };
-    runManualCommand(id, () => client.swipeDevice(id, input), `Swipe ${direction.toLowerCase()} failed`);
+    runManualCommand(id, () => client.swipeDevice(id, input, 'INSPECTOR'), `Swipe ${direction.toLowerCase()} failed`);
   }, [client, runManualCommand]);
 
   const refreshUiTree = useCallback((id: string) => {
@@ -230,6 +351,13 @@ export function useControlCenter() {
     }).catch(error => setToast(error instanceof Error ? error.message : 'Device connection failed'));
   }, [client, devices, refreshWdaStatus]);
 
+  const disconnectConfiguredDevice = useCallback((id: string) => {
+    void client.deviceAction(id, 'clear-configuration').then(snapshot => {
+      applyDeviceSnapshot(snapshot);
+      setToast(`${snapshot.name} disconnected`);
+    }).catch(error => setToast(error instanceof Error ? error.message : 'Device disconnect failed'));
+  }, [applyDeviceSnapshot, client]);
+
   const reorderVisibleDevices = useCallback((sourceId: string, targetId: string) => {
     setManualDeviceOrder(current => reorderDeviceIds(current, sourceId, targetId, visibleDevices.map(device => device.id)));
   }, [visibleDeviceKey]);
@@ -256,6 +384,30 @@ export function useControlCenter() {
     setFocusedId(workspace.deviceIds[0] ?? null);
     localStorage.setItem('omnideck.active-workspace', workspace.id);
   };
+
+  const focusDeviceForControl = useCallback((id: string) => {
+    setFocusedId(id);
+    setLastAnchor(id);
+  }, []);
+
+  useEffect(() => {
+    if (fullscreenId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableKeyboardTarget(event.target)) return;
+      if ((event.target as HTMLElement | null)?.closest?.('[data-keyboard-surface="local"]')) return;
+      const id = focusedId;
+      if (!id) return;
+      const device = devices.find(item => item.id === id);
+      if (!device || device.agentStatus !== 'HUMAN_CONTROL') return;
+      if (!handleDeviceScreenKeyDown(event, {
+        onInputText: text => previewInputText(id, text, 'LIVE_PREVIEW'),
+        onPressKey: key => previewPressKey(id, key, 'LIVE_PREVIEW'),
+      })) return;
+      event.preventDefault();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [devices, focusedId, fullscreenId, previewInputText, previewPressKey]);
 
   const selectDevice = (id: string, event: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }) => {
     setFocusedId(id);
@@ -327,14 +479,29 @@ export function useControlCenter() {
   return {
     devices, groups, workspaces, activeWorkspaceId, groupId, layout, visibleDevices, selectedIds, focusedId, fullscreenId, wallOnly,
     selectedDevice, stats, workerSnapshot: runtime?.workers ?? { active: 0, queued: 0, completed: 0 }, connection, workspaceName, toast,
-    setLayout: setLayoutState, setGroupId, setWorkspace, selectDevice, toggleCheckbox, selectAll, clearSelection, closeInspector,
-    setFullscreenId, setWallOnly, runBatch, applyBatchAction, toggleOffline, takeHumanControl: (id: string) => sendAction(id, 'take-control'),
-    releaseHumanControl: (id: string) => sendAction(id, 'release-control'),
+    setLayout: setLayoutState, setGroupId, setWorkspace, selectDevice, focusDeviceForControl, toggleCheckbox, selectAll, clearSelection, closeInspector,
+    setFullscreenId, setWallOnly, runBatch, applyBatchAction, toggleOffline,     takeHumanControl: takeHumanControlDevice,
+    releaseHumanControl: releaseHumanControlDevice,
     pauseDevice: (id: string) => sendAction(id, 'pause'), resumeDevice: (id: string) => sendAction(id, 'resume'), retryDevice: (id: string) => sendAction(id, 'retry'),
     setWorkspaceName, saveWorkspace, createCustomGroup, discoveredDevices, connectionPanelOpen, setConnectionPanelOpen,
-    discoveryState, discoverDevices, configureDevice, connectDevice, tapDevice, reorderVisibleDevices, wdaStatuses, refreshWdaStatus,
+    discoveryState, discoverDevices, configureDevice, connectDevice, disconnectConfiguredDevice, tapDevice, swipeDevice, longPressDevice, scrollDevice, previewInputText, previewPressKey, reorderVisibleDevices, wdaStatuses, refreshWdaStatus,
     manualBack, manualHome, manualInputText, manualLongPress, manualSwipe, manualStopApp, refreshUiTree, uiTree: uiTree?.deviceId === selectedId ? uiTree.tree : null, uiTreeLoading,
   };
+}
+
+function formatControlError(error: unknown, fallback: string): string {
+  if (isAbortError(error)) return '';
+  const message = error instanceof Error ? error.message : fallback;
+  if (/not found/i.test(message)) {
+    return `${message}. Restart the control daemon (npm run dev or npm run start:daemon) to load the latest scroll/keyboard routes.`;
+  }
+  return message || fallback;
+}
+
+function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === 'AbortError') return true;
+  if (error instanceof Error && /abort|canceled|cancelled/i.test(error.message)) return true;
+  return false;
 }
 
 function isWdaConnectable(status: IOSWdaStatusDTO): boolean {

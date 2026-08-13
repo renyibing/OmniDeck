@@ -95,8 +95,11 @@ export class DeviceDiscovery {
       this.discoverAndroid(),
       this.discoverIOS(),
     ]);
-    const discovered = this.mergeCandidates(this.staticCandidates ?? [], [...android, ...ios]);
-    return this.remember(discovered.length ? discovered : this.defaults);
+    return this.remember(this.mergeCandidates(this.staticCandidates ?? [], [...android, ...ios]));
+  }
+
+  usesHostDiscovery(): boolean {
+    return this.hostDiscovery;
   }
 
   getByDeviceId(deviceId: string): DiscoveredDevice | undefined {
@@ -223,20 +226,20 @@ export class DeviceDiscovery {
   }
 
   private mergeCandidates(staticCandidates: DiscoveredDevice[], hostCandidates: DiscoveredDevice[]): DiscoveredDevice[] {
-    const hostByIdentity = new Map(hostCandidates.map(candidate => [identityKey(candidate), candidate]));
-    const merged = staticCandidates.map(candidate => {
-      const detected = hostByIdentity.get(identityKey(candidate));
-      if (!detected) return candidate;
-      hostByIdentity.delete(identityKey(candidate));
+    if (!hostCandidates.length) return [];
+    const staticByIdentity = new Map(staticCandidates.map(candidate => [identityKey(candidate), candidate]));
+    const staticByDeviceId = new Map(staticCandidates.map(candidate => [candidate.deviceId, candidate]));
+    return hostCandidates.map(host => {
+      const binding = staticByIdentity.get(identityKey(host)) ?? staticByDeviceId.get(host.deviceId);
+      if (!binding) return host;
       return {
-        ...detected,
-        candidateId: candidate.candidateId,
-        deviceId: candidate.deviceId,
-        driverMode: candidate.driverMode,
-        simulated: candidate.simulated,
+        ...host,
+        candidateId: binding.candidateId,
+        deviceId: binding.deviceId,
+        driverMode: binding.driverMode,
+        simulated: binding.simulated,
       };
     });
-    return [...merged, ...hostByIdentity.values()];
   }
 
   private pickDeviceId(platform: Platform, identifier: string, used: Set<string>): string | undefined {

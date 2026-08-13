@@ -71,7 +71,7 @@ describe('native driver boundaries', () => {
     const monitorFrame = vi.fn(() => new Promise<{ deviceId: string; capturedAt: number; contentType: 'image/png'; data: Buffer }>(resolve => { resolveFrame = resolve; }));
     registry.register({
       deviceId: 'device-01', platform: 'ANDROID', connect: vi.fn(), disconnect: vi.fn(),
-      screenshot: vi.fn(), monitorFrame, getUiHierarchy: vi.fn(), getScreenSize: vi.fn(), tap: vi.fn(), swipe: vi.fn(), longPress: vi.fn(), inputText: vi.fn(), back: vi.fn(), home: vi.fn(), launchApp: vi.fn(), restartApp: vi.fn(), stopApp: vi.fn(),
+      screenshot: vi.fn(), monitorFrame, getUiHierarchy: vi.fn(), getScreenSize: vi.fn(), tap: vi.fn(), swipe: vi.fn(), longPress: vi.fn(), inputText: vi.fn(), pressKey: vi.fn(), back: vi.fn(), home: vi.fn(), launchApp: vi.fn(), restartApp: vi.fn(), stopApp: vi.fn(),
       performGoalStep: vi.fn(), health: vi.fn(),
     });
     const first = registry.monitorFrame('device-01');
@@ -178,6 +178,8 @@ describe('native driver boundaries', () => {
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell input text hello%sworld%s\\&%sok');
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell input keyevent KEYCODE_BACK');
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell input keyevent KEYCODE_HOME');
+    await driver.pressKey('Enter');
+    expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell input keyevent KEYCODE_ENTER');
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell am force-stop com.example');
     expect(encodeAdbInputText('a b')).toBe('a%sb');
   });
@@ -255,7 +257,7 @@ describe('native driver boundaries', () => {
     expect(spawned[0].process.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
-  it('uses the current WDA tap route and device-local viewport coordinates for iOS', async () => {
+  it('uses WDA drag, touch-and-hold, keys, and home routes for iOS gestures', async () => {
     const requests: Array<{ url: string; method: string; body?: string }> = [];
     const request = vi.fn(async (url: string, init?: RequestInit) => {
       requests.push({
@@ -270,7 +272,108 @@ describe('native driver boundaries', () => {
       if (url.endsWith('/session/session-03/appium/settings')) return new Response(JSON.stringify({ value: {} }), { status: 200 });
       if (url.endsWith('/window/size')) return new Response(JSON.stringify({ value: { width: 390, height: 844 } }), { status: 200 });
       if (url.endsWith('/orientation')) return new Response(JSON.stringify({ value: 'PORTRAIT' }), { status: 200 });
-      if (url.endsWith('/session/session-03/wda/tap')) return new Response(JSON.stringify({ value: null }), { status: 200 });
+      if (url.endsWith('/element/active')) {
+        return new Response(JSON.stringify({ value: { 'element-6066-11e4-a52e-4f735466cecf': 'elem-input-1' } }), { status: 200 });
+      }
+      if (url.endsWith('/attribute/value')) {
+        return new Response(JSON.stringify({ value: 'hello' }), { status: 200 });
+      }
+      if (url.includes('/element/elem-input-1/value')) return new Response(JSON.stringify({ value: null }), { status: 200 });
+      if (url.includes('/wda/')) return new Response(JSON.stringify({ value: null }), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const driver = new IOSXCUITestDriver('device-03', {
+      udid: '00008020-001C259A0ED8003A',
+      wdaUrl: 'http://127.0.0.1:8100',
+      request,
+    });
+
+    await driver.connect();
+    await driver.swipe({ from: { x: 0.5, y: 0.8 }, to: { x: 0.5, y: 0.2 }, durationMs: 400 });
+    await driver.longPress({ point: { x: 0.4, y: 0.6 }, durationMs: 700 });
+    await driver.inputText('hello', undefined);
+    await driver.pressKey('Backspace');
+    await driver.home();
+
+    expect(requests).toContainEqual({
+      url: 'http://127.0.0.1:8100/session/session-03/wda/keys',
+      method: 'POST',
+      body: JSON.stringify({ value: ['\uE003'], frequency: 4800 }),
+    });
+    expect(requests).toContainEqual({
+      url: 'http://127.0.0.1:8100/session/session-03/wda/dragfromtoforduration',
+      method: 'POST',
+      body: JSON.stringify({ fromX: 195, fromY: 674, toX: 195, toY: 169, duration: 0.02 }),
+    });
+    expect(requests).toContainEqual({
+      url: 'http://127.0.0.1:8100/session/session-03/wda/touchAndHold',
+      method: 'POST',
+      body: JSON.stringify({ x: 156, y: 506, duration: 0.7 }),
+    });
+    expect(requests).toContainEqual({
+      url: 'http://127.0.0.1:8100/session/session-03/wda/keys',
+      method: 'POST',
+      body: JSON.stringify({ value: ['h', 'e', 'l', 'l', 'o'], frequency: 4800 }),
+    });
+    expect(requests).toContainEqual({
+      url: 'http://127.0.0.1:8100/session/session-03/wda/pressButton',
+      method: 'POST',
+      body: JSON.stringify({ name: 'home' }),
+    });
+  });
+
+  it('uses coordinate flick for iOS wheel scrolling', async () => {
+    const requests: Array<{ url: string; method: string; body?: string }> = [];
+    const request = vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push({
+        url,
+        method: init?.method ?? 'GET',
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      if (url.endsWith('/status')) return new Response(JSON.stringify({ value: { ready: true } }), { status: 200 });
+      if (url.endsWith('/session')) {
+        return new Response(JSON.stringify({ value: { sessionId: 'session-03' }, sessionId: 'session-03' }), { status: 200 });
+      }
+      if (url.endsWith('/session/session-03/appium/settings')) return new Response(JSON.stringify({ value: {} }), { status: 200 });
+      if (url.endsWith('/window/size')) return new Response(JSON.stringify({ value: { width: 390, height: 844 } }), { status: 200 });
+      if (url.endsWith('/orientation')) return new Response(JSON.stringify({ value: 'PORTRAIT' }), { status: 200 });
+      if (url.includes('/wda/')) return new Response(JSON.stringify({ value: null }), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const driver = new IOSXCUITestDriver('device-03', {
+      udid: '00008020-001C259A0ED8003A',
+      wdaUrl: 'http://127.0.0.1:8100',
+      request,
+    });
+
+    await driver.connect();
+    await driver.scrollWheel?.({ point: { x: 0.5, y: 0.5 }, deltaX: 0, deltaY: 120 });
+
+    expect(requests).toContainEqual({
+      url: 'http://127.0.0.1:8100/session/session-03/wda/dragfromtoforduration',
+      method: 'POST',
+      body: JSON.stringify({ fromX: 195, fromY: 422, toX: 195, toY: 270, duration: 0 }),
+    });
+  });
+
+  it('uses drag-from-to as the iOS tap primitive and disables WDA idle waits', async () => {
+    const requests: Array<{ url: string; method: string; body?: string }> = [];
+    const request = vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push({
+        url,
+        method: init?.method ?? 'GET',
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      if (url.endsWith('/status')) return new Response(JSON.stringify({ value: { ready: true } }), { status: 200 });
+      if (url.endsWith('/session')) {
+        return new Response(JSON.stringify({ value: { sessionId: 'session-03' }, sessionId: 'session-03' }), { status: 200 });
+      }
+      if (url.endsWith('/session/session-03/appium/settings')) return new Response(JSON.stringify({ value: {} }), { status: 200 });
+      if (url.endsWith('/window/size')) return new Response(JSON.stringify({ value: { width: 390, height: 844 } }), { status: 200 });
+      if (url.endsWith('/orientation')) return new Response(JSON.stringify({ value: 'PORTRAIT' }), { status: 200 });
+      if (url.endsWith('/session/session-03/wda/dragfromtoforduration')) return new Response(JSON.stringify({ value: null }), { status: 200 });
       throw new Error(`Unexpected request: ${url}`);
     }) as unknown as typeof fetch;
 
@@ -291,6 +394,8 @@ describe('native driver boundaries', () => {
         method: 'POST',
         body: JSON.stringify({
           settings: {
+            waitForIdleTimeout: 0,
+            animationCoolOffTimeout: 0,
             screenshotQuality: 2,
             mjpegServerFramerate: 15,
             mjpegScalingFactor: 56,
@@ -298,10 +403,45 @@ describe('native driver boundaries', () => {
           },
         }),
       },
-      { url: 'http://127.0.0.1:8100/window/size', method: 'GET', body: undefined },
-      { url: 'http://127.0.0.1:8100/orientation', method: 'GET', body: undefined },
-      { url: 'http://127.0.0.1:8100/session/session-03/wda/tap', method: 'POST', body: JSON.stringify({ x: 195, y: 211 }) },
+      { url: 'http://127.0.0.1:8100/session/session-03/window/size', method: 'GET', body: undefined },
+      { url: 'http://127.0.0.1:8100/session/session-03/orientation', method: 'GET', body: undefined },
+      { url: 'http://127.0.0.1:8100/session/session-03/wda/dragfromtoforduration', method: 'POST', body: JSON.stringify({ fromX: 195, fromY: 211, toX: 195, toY: 211, duration: 0 }) },
     ]);
+  });
+
+  it('recreates a stale WDA session once when tap hits a recoverable session error', async () => {
+    let tapAttempts = 0;
+    let sessionCounter = 0;
+    const request = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/status')) return new Response(JSON.stringify({ value: { ready: true } }), { status: 200 });
+      if (url.endsWith('/session') && init?.method === 'POST') {
+        sessionCounter += 1;
+        const sessionId = `session-${sessionCounter}`;
+        return new Response(JSON.stringify({ value: { sessionId }, sessionId }), { status: 200 });
+      }
+      if (url.endsWith('/appium/settings')) return new Response(JSON.stringify({ value: {} }), { status: 200 });
+      if (url.endsWith('/window/size')) return new Response(JSON.stringify({ value: { width: 390, height: 844 } }), { status: 200 });
+      if (url.endsWith('/orientation')) return new Response(JSON.stringify({ value: 'PORTRAIT' }), { status: 200 });
+      if (url.includes('/wda/dragfromtoforduration')) {
+        tapAttempts += 1;
+        if (tapAttempts === 1) return new Response(JSON.stringify({ value: { error: 'invalid session id' } }), { status: 404 });
+        return new Response(JSON.stringify({ value: null }), { status: 200 });
+      }
+      if (init?.method === 'DELETE') return new Response(JSON.stringify({ value: null }), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    }) as unknown as typeof fetch;
+
+    const driver = new IOSXCUITestDriver('device-03', {
+      udid: '00008020-001C259A0ED8003A',
+      wdaUrl: 'http://127.0.0.1:8100',
+      request,
+    });
+
+    await driver.connect();
+    await driver.tap({ x: 0.5, y: 0.5 });
+
+    expect(tapAttempts).toBe(2);
+    expect(sessionCounter).toBe(2);
   });
 
   it('reports actionable WDA endpoint errors when iOS WDA is unreachable', async () => {
@@ -542,6 +682,22 @@ describe('control plane lifecycle', () => {
     expect(history).toContain('action=tap target=x=50% y=50%');
     expect(history).toContain('action=tap verification=UI_HIERARCHY_AFTER_ACTION');
     expect(devices.get('device-02')?.actionHistory.map(event => event.message).join('\n')).not.toContain('action=tap');
+  });
+
+  it('does not block manual screen input when the global IOS pool is exhausted', async () => {
+    const devices = new DeviceManager(4);
+    const scheduler = new TaskScheduler({ ...config, rateLimitPerMinute: 60 });
+    const drivers = new DriverRegistry();
+    for (const session of devices.getAll()) {
+      drivers.register(new SimulatedDeviceDriver(session, 1));
+    }
+    const plane = new ControlPlane(devices, scheduler, drivers, { autoExecute: false });
+    for (let index = 0; index < 4; index += 1) {
+      expect(scheduler.resources.acquire('IOS')).toBe(true);
+    }
+    expect(scheduler.resources.acquire('IOS')).toBe(false);
+    plane.takeHumanControl('device-03');
+    await expect(plane.tapDevice('device-03', { x: 0.5, y: 0.5 })).resolves.toBeUndefined();
   });
 
   it('redacts text input in the device-local action history', async () => {

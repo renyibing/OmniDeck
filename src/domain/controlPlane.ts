@@ -1,5 +1,5 @@
 import { DeviceManager } from './deviceManager';
-import type { DeviceDriverAdapter, LongPressRequest, NormalizedPoint, SwipeRequest } from './deviceDriver';
+import type { DeviceDriverAdapter, DevicePressKey, LongPressRequest, NormalizedPoint, ScrollWheelRequest, SwipeRequest } from './deviceDriver';
 import { DriverRegistry } from './deviceDriver';
 import { StreamManager } from './streamManager';
 import { TaskScheduler } from './taskScheduler';
@@ -17,9 +17,11 @@ export class ControlPlane {
   private readonly tasks = new Map<string, TaskInstance>();
   private readonly controllers = new Map<string, AbortController>();
   private readonly deviceControllers = new Map<string, Set<AbortController>>();
+  private readonly manualActionChains = new Map<string, Promise<void>>();
   private readonly listeners = new Set<ControlPlaneListener>();
   private readonly streamManager = new StreamManager();
   private readonly autoExecute: boolean;
+  private static readonly MANUAL_COMMAND_TIMEOUT_MS = 20_000;
 
   constructor(
     readonly devices: DeviceManager,
@@ -189,12 +191,40 @@ export class ControlPlane {
     await this.runManualAction(deviceId, 'swipe', `from=${percent(request.from.x)},${percent(request.from.y)} to=${percent(request.to.x)},${percent(request.to.y)} durationMs=${request.durationMs ?? 350}`, source, (driver, signal) => driver.swipe(request, signal));
   }
 
+  async scrollWheelDevice(deviceId: string, request: ScrollWheelRequest, source = 'LIVE_PREVIEW'): Promise<void> {
+    await this.runManualAction(
+      deviceId,
+      'scroll_wheel',
+      `x=${percent(request.point.x)} y=${percent(request.point.y)} deltaX=${Math.round(request.deltaX)} deltaY=${Math.round(request.deltaY)}`,
+      source,
+      async (driver, signal) => {
+        if (driver.scrollWheel) {
+          await driver.scrollWheel(request, signal);
+          return;
+        }
+        const dominant = Math.abs(request.deltaX) > Math.abs(request.deltaY);
+        const magnitude = Math.min(0.32, Math.max(0.07, (Math.abs(dominant ? request.deltaX : request.deltaY) / 120) * 0.11));
+        const from = request.point;
+        const to = dominant
+          ? { x: clampPercent(from.x + Math.sign(request.deltaX) * magnitude), y: from.y }
+          : { x: from.x, y: clampPercent(from.y + Math.sign(-request.deltaY) * magnitude) };
+        const distance = Math.hypot(to.x - from.x, to.y - from.y);
+        const durationMs = Math.min(900, Math.max(180, Math.round(180 + distance * 700)));
+        await driver.swipe({ from, to, durationMs }, signal);
+      },
+    );
+  }
+
   async longPressDevice(deviceId: string, request: LongPressRequest, source = 'INSPECTOR'): Promise<void> {
     await this.runManualAction(deviceId, 'long_press', `x=${percent(request.point.x)} y=${percent(request.point.y)} durationMs=${request.durationMs ?? 650}`, source, (driver, signal) => driver.longPress(request, signal));
   }
 
   async inputTextDevice(deviceId: string, text: string, source = 'INSPECTOR'): Promise<void> {
     await this.runManualAction(deviceId, 'input_text', `redactedLength=${text.length}`, source, (driver, signal) => driver.inputText(text, signal));
+  }
+
+  async pressKeyDevice(deviceId: string, key: DevicePressKey, source = 'INSPECTOR'): Promise<void> {
+    await this.runManualAction(deviceId, 'press_key', `key=${key}`, source, (driver, signal) => driver.pressKey(key, signal));
   }
 
   async backDevice(deviceId: string, source = 'INSPECTOR'): Promise<void> {
@@ -224,6 +254,8 @@ export class ControlPlane {
   takeHumanControl(deviceId: string): void {
     const session = this.devices.get(deviceId);
     if (!session || session.status !== 'ONLINE') return;
+    this.abortDeviceCommands(deviceId, 'Human control started');
+    this.manualActionChains.delete(deviceId);
     if (session.currentTask) {
       this.abort(session.currentTask.id, 'Human takeover');
       const promoted = this.scheduler.workers.release(session.currentTask.id);
@@ -241,6 +273,8 @@ export class ControlPlane {
   releaseHumanControl(deviceId: string): void {
     const session = this.devices.get(deviceId);
     if (!session || session.agentStatus !== 'HUMAN_CONTROL') return;
+    this.abortDeviceCommands(deviceId, 'Human control released');
+    this.manualActionChains.delete(deviceId);
     session.agentStatus = session.currentTask ? 'PAUSED' : 'IDLE';
     session.agentSession.status = session.agentStatus;
     this.record(session, 'SYSTEM', 'Human control released; agent remains paused');
@@ -386,21 +420,57 @@ export class ControlPlane {
   }
 
   private async runDriverCommand(deviceId: string, command: (driver: DeviceDriverAdapter, signal: AbortSignal) => Promise<void>): Promise<void> {
-    await this.readDriverData(deviceId, command);
+    await this.enqueueManualDriverCommand(deviceId, command);
+  }
+
+  private enqueueManualDriverCommand<T>(
+    deviceId: string,
+    command: (driver: DeviceDriverAdapter, signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const previous = this.manualActionChains.get(deviceId) ?? Promise.resolve();
+    const run = previous.then(
+      () => this.runManualDriverData(deviceId, command),
+      () => this.runManualDriverData(deviceId, command),
+    );
+    this.manualActionChains.set(deviceId, run.then(() => undefined, () => undefined));
+    return run;
+  }
+
+  /** Human screen input is serialized per device and does not consume the global IOS/ADB pool. */
+  private async runManualDriverData<T>(
+    deviceId: string,
+    command: (driver: DeviceDriverAdapter, signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const session = this.devices.get(deviceId);
+    if (!session || session.status !== 'ONLINE') throw new Error(`Device ${deviceId} is offline`);
+    const controller = new AbortController();
+    const timeoutMs = Math.min(this.scheduler.config.timeoutMs, ControlPlane.MANUAL_COMMAND_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(new Error('Device command timeout')), timeoutMs);
+    this.trackDeviceCommand(deviceId, controller);
+    try {
+      return await command(this.drivers.get(deviceId), controller.signal);
+    } finally {
+      clearTimeout(timeout);
+      this.untrackDeviceCommand(deviceId, controller);
+    }
   }
 
   private async readDriverData<T>(deviceId: string, command: (driver: DeviceDriverAdapter, signal: AbortSignal) => Promise<T>): Promise<T> {
     const session = this.devices.get(deviceId);
     if (!session || session.status !== 'ONLINE') throw new Error(`Device ${deviceId} is offline`);
     const resource = this.platformResource(session.platform);
-    if (!this.scheduler.resources.acquire(resource)) throw new Error(`${resource} concurrency limit reached`);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error('Device command timeout')), this.scheduler.config.timeoutMs);
     this.trackDeviceCommand(deviceId, controller);
-    try { return await command(this.drivers.get(deviceId), controller.signal); } finally {
+    let acquired = false;
+    try {
+      await this.scheduler.resources.acquireWait(resource, controller.signal);
+      acquired = true;
+      return await command(this.drivers.get(deviceId), controller.signal);
+    } finally {
       clearTimeout(timeout);
       this.untrackDeviceCommand(deviceId, controller);
-      this.scheduler.resources.release(resource);
+      if (acquired) this.scheduler.resources.release(resource);
     }
   }
 
@@ -484,6 +554,10 @@ export class ControlPlane {
 
 function percent(value: number): string {
   return `${Math.round(value * 100)}%`;
+}
+
+function clampPercent(value: number): number {
+  return Math.min(1, Math.max(0, value));
 }
 
 export function describeDriverError(error: unknown): string {

@@ -1,7 +1,17 @@
 import { eventEnvelopeSchema, type DeviceConfigurationDTO, type DeviceDetailDTO, type DeviceSummaryDTO, type DiscoveredDeviceDTO, type EventEnvelope, type RuntimeSnapshot, type StreamPolicyCommand, type BatchTaskCommand, type IOSWdaStatusDTO, type UiHierarchyDTO } from '../server/protocol';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
-export type DeviceAction = 'pause' | 'resume' | 'stop' | 'retry' | 'take-control' | 'release-control' | 'disconnect' | 'recover' | 'restart-app' | 'launch-app' | 'stop-app';
+export type DeviceAction = 'pause' | 'resume' | 'stop' | 'retry' | 'take-control' | 'release-control' | 'disconnect' | 'clear-configuration' | 'recover' | 'restart-app' | 'launch-app' | 'stop-app';
+export type ScreenInputSource = 'INSPECTOR' | 'LIVE_PREVIEW' | 'FULLSCREEN_PREVIEW';
+export type DevicePressKey =
+  | 'Enter'
+  | 'Backspace'
+  | 'Delete'
+  | 'Tab'
+  | 'ArrowUp'
+  | 'ArrowDown'
+  | 'ArrowLeft'
+  | 'ArrowRight';
 export interface ScreenTapPoint { x: number; y: number; }
 export interface SwipeCommandInput { from: ScreenTapPoint; to: ScreenTapPoint; durationMs?: number; }
 
@@ -66,42 +76,69 @@ export class ControlCenterClient {
     await this.request('/tasks/batch', { method: 'POST', body: command });
   }
 
-  async deviceAction(deviceId: string, action: DeviceAction, commandId = crypto.randomUUID(), appId?: string): Promise<void> {
-    await this.request(`/devices/${encodeURIComponent(deviceId)}/${action}`, {
+  async deviceAction(deviceId: string, action: DeviceAction, commandId = crypto.randomUUID(), appId?: string, signal?: AbortSignal): Promise<DeviceSummaryDTO> {
+    const result = await this.request<{ device: DeviceSummaryDTO }>(`/devices/${encodeURIComponent(deviceId)}/${action}`, {
       method: 'POST',
       body: { commandId, deviceId, timestamp: Date.now(), ...(action === 'launch-app' || action === 'stop-app' ? { appId: appId ?? 'Omni Market' } : {}) },
+      signal,
     });
+    return result.device;
   }
 
   async stopAppDevice(deviceId: string, appId: string, commandId = crypto.randomUUID()): Promise<void> {
     await this.deviceAction(deviceId, 'stop-app', commandId, appId);
   }
 
-  async tapDevice(deviceId: string, point: ScreenTapPoint, source: 'LIVE_PREVIEW' | 'FULLSCREEN_PREVIEW' = 'LIVE_PREVIEW', commandId = crypto.randomUUID()): Promise<void> {
-    await this.request(`/devices/${encodeURIComponent(deviceId)}/tap`, {
-      method: 'POST',
-      body: { commandId, deviceId, timestamp: Date.now(), point, source },
-    });
+  async tapDevice(deviceId: string, point: ScreenTapPoint, source: 'LIVE_PREVIEW' | 'FULLSCREEN_PREVIEW' = 'LIVE_PREVIEW', signal?: AbortSignal, commandId = crypto.randomUUID()): Promise<void> {
+    const { signal: requestSignal, dispose } = withRequestTimeout(signal, 25_000);
+    try {
+      await this.request(`/devices/${encodeURIComponent(deviceId)}/tap`, {
+        method: 'POST',
+        body: { commandId, deviceId, timestamp: Date.now(), point, source },
+        signal: requestSignal,
+      });
+    } finally {
+      dispose();
+    }
   }
 
-  async swipeDevice(deviceId: string, input: SwipeCommandInput, commandId = crypto.randomUUID()): Promise<void> {
+  async swipeDevice(deviceId: string, input: SwipeCommandInput, source: ScreenInputSource = 'INSPECTOR', signal?: AbortSignal, commandId = crypto.randomUUID()): Promise<void> {
     await this.request(`/devices/${encodeURIComponent(deviceId)}/swipe`, {
       method: 'POST',
-      body: { commandId, deviceId, timestamp: Date.now(), ...input, source: 'INSPECTOR' },
+      body: { commandId, deviceId, timestamp: Date.now(), ...input, source },
+      signal,
     });
   }
 
-  async longPressDevice(deviceId: string, point: ScreenTapPoint, durationMs = 650, commandId = crypto.randomUUID()): Promise<void> {
+  async longPressDevice(deviceId: string, point: ScreenTapPoint, durationMs = 650, source: ScreenInputSource = 'INSPECTOR', signal?: AbortSignal, commandId = crypto.randomUUID()): Promise<void> {
     await this.request(`/devices/${encodeURIComponent(deviceId)}/long-press`, {
       method: 'POST',
-      body: { commandId, deviceId, timestamp: Date.now(), point, durationMs, source: 'INSPECTOR' },
+      body: { commandId, deviceId, timestamp: Date.now(), point, durationMs, source },
+      signal,
     });
   }
 
-  async inputTextDevice(deviceId: string, text: string, commandId = crypto.randomUUID()): Promise<void> {
+  async inputTextDevice(deviceId: string, text: string, source: ScreenInputSource = 'INSPECTOR', signal?: AbortSignal, commandId = crypto.randomUUID()): Promise<void> {
     await this.request(`/devices/${encodeURIComponent(deviceId)}/input-text`, {
       method: 'POST',
-      body: { commandId, deviceId, timestamp: Date.now(), text, source: 'INSPECTOR' },
+      body: { commandId, deviceId, timestamp: Date.now(), text, source },
+      signal,
+    });
+  }
+
+  async pressKeyDevice(deviceId: string, key: DevicePressKey, source: ScreenInputSource = 'INSPECTOR', signal?: AbortSignal, commandId = crypto.randomUUID()): Promise<void> {
+    await this.request(`/devices/${encodeURIComponent(deviceId)}/press-key`, {
+      method: 'POST',
+      body: { commandId, deviceId, timestamp: Date.now(), key, source },
+      signal,
+    });
+  }
+
+  async scrollWheelDevice(deviceId: string, point: ScreenTapPoint, deltaX: number, deltaY: number, source: ScreenInputSource = 'LIVE_PREVIEW', signal?: AbortSignal, commandId = crypto.randomUUID()): Promise<void> {
+    await this.request(`/devices/${encodeURIComponent(deviceId)}/scroll`, {
+      method: 'POST',
+      body: { commandId, deviceId, timestamp: Date.now(), point, deltaX, deltaY, source },
+      signal,
     });
   }
 
@@ -178,14 +215,45 @@ export class ControlCenterClient {
   }
 
   private async request<T = unknown>(path: string, options: { method?: 'GET' | 'POST'; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
-    const response = await fetch(`${this.apiBase}${path}`, {
-      method: options.method ?? 'GET',
-      headers: options.body ? { 'content-type': 'application/json', 'x-omnideck-client': 'web' } : { 'x-omnideck-client': 'web' },
-      body: options.body ? JSON.stringify(options.body) : undefined,
-      signal: options.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.apiBase}${path}`, {
+        method: options.method ?? 'GET',
+        headers: options.body ? { 'content-type': 'application/json', 'x-omnideck-client': 'web' } : { 'x-omnideck-client': 'web' },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: options.signal,
+      });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new Error(error instanceof Error ? error.message : 'Control service request failed');
+    }
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof payload?.error === 'string' ? payload.error : `Control service request failed (${response.status})`);
     return payload as T;
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === 'AbortError') return true;
+  if (error instanceof Error && /abort|canceled|cancelled|timed out|timeout/i.test(error.message)) return true;
+  return false;
+}
+
+function withRequestTimeout(signal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs);
+  const onAbort = () => controller.abort(signal?.reason ?? new Error('Request aborted'));
+  if (signal?.aborted) {
+    window.clearTimeout(timer);
+    controller.abort(signal.reason);
+  } else {
+    signal?.addEventListener('abort', onAbort, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    },
+  };
 }
