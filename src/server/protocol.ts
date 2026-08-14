@@ -19,8 +19,16 @@ import type { DeviceConfiguration, DeviceConnection } from '../domain/types';
 import type { DiscoveredDevice } from '../domain/deviceDiscovery';
 import type { IOSWdaStatus } from '../domain/iosWdaDiagnostics';
 import type { UiHierarchy } from '../domain/androidUiHierarchy';
+import type { AgentStateSnapshot } from '../domain/observationBuilder';
+import type { AgentArtifactRecord, AgentArtifactSummary } from '../domain/artifactStore';
+import type { AgentStepRecord } from '../domain/agentStepTrace';
+import type { TaskAuditBundle, TaskSummary } from '../domain/controlPlane';
 
 export const protocolVersion = 'v1' as const;
+
+export type DeviceWallTaskDTO = Pick<TaskInstance,
+  'id' | 'batchId' | 'deviceId' | 'goal' | 'status' | 'priority' | 'attempts' | 'createdAt' | 'updatedAt' | 'startedAt' | 'finishedAt' | 'error' | 'maxSteps' | 'currentStepIndex' | 'completedSteps'
+>;
 
 /** Lightweight wall DTO. It intentionally excludes histories, memory, and live domain objects. */
 export interface DeviceSummaryDTO {
@@ -35,14 +43,14 @@ export interface DeviceSummaryDTO {
   groupIds: string[];
   metrics: DeviceMetrics;
   stream: StreamProfile;
-  currentTask: TaskInstance | null;
+  currentTask: DeviceWallTaskDTO | null;
   queuedTaskCount: number;
   screenshotSeed: number;
   sessionRevision: number;
   configuration: DeviceConfiguration | null;
   connection: DeviceConnection;
   livePreview: boolean;
-  /** Low-latency H.264 preview over WebSocket + WebCodecs (Android scrcpy-server). */
+  /** Low-latency H.264 preview over WebSocket + WebCodecs (Android scrcpy-server), present only while available. */
   previewVideoUrl: string | null;
   /** MJPEG fallback preview for iOS or when H.264 is unavailable. */
   previewStreamUrl: string | null;
@@ -51,8 +59,15 @@ export interface DeviceSummaryDTO {
 export type DiscoveredDeviceDTO = DiscoveredDevice;
 export type IOSWdaStatusDTO = IOSWdaStatus;
 export type UiHierarchyDTO = UiHierarchy;
+export type AgentStateDTO = AgentStateSnapshot;
+export type AgentArtifactDTO = AgentArtifactRecord;
+export type AgentArtifactSummaryDTO = AgentArtifactSummary;
+export type AgentTaskTraceDTO = AgentStepRecord;
+export type TaskSummaryDTO = TaskSummary;
+export type TaskAuditDTO = TaskAuditBundle;
 
 export interface DeviceDetailDTO extends DeviceSummaryDTO {
+  currentTask: TaskInstance | null;
   agentSessionId: string;
   workerId: string | null;
   healthState: DeviceSession['healthState'];
@@ -210,6 +225,10 @@ export const configureDeviceCommandSchema = commandBase.extend({
 
 export const connectDeviceCommandSchema = deviceCommandSchema;
 
+export const taskApprovalCommandSchema = deviceCommandSchema.extend({
+  taskId: z.string().trim().min(1),
+});
+
 export type DeviceConfigurationDTO = Omit<DeviceConfiguration, 'configuredAt'>;
 export type ConfiguredDeviceConfigurationDTO = DeviceConfiguration;
 export interface ConnectionAttemptDTO extends DeviceConnection {
@@ -226,10 +245,11 @@ export type InputTextCommand = z.infer<typeof inputTextCommandSchema>;
 export type PressKeyCommand = z.infer<typeof pressKeyCommandSchema>;
 export type ScrollWheelCommand = z.infer<typeof scrollWheelCommandSchema>;
 export type StreamPolicyCommand = z.infer<typeof streamPolicyCommandSchema>;
+export type TaskApprovalCommand = z.infer<typeof taskApprovalCommandSchema>;
 
 export const cloneSnapshot = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
-export const toDeviceSummary = (session: DeviceSession): DeviceSummaryDTO => cloneSnapshot({
+export const toDeviceSummary = (session: DeviceSession, options: { androidVideoReady?: boolean } = {}): DeviceSummaryDTO => cloneSnapshot({
   id: session.id,
   name: session.name,
   platform: session.platform,
@@ -241,14 +261,14 @@ export const toDeviceSummary = (session: DeviceSession): DeviceSummaryDTO => clo
   groupIds: session.groupIds,
   metrics: session.metrics,
   stream: session.stream,
-  currentTask: session.currentTask,
+  currentTask: toWallTask(session.currentTask),
   queuedTaskCount: session.taskQueue.length,
   screenshotSeed: session.screenshotSeed,
   sessionRevision: session.sessionRevision,
   configuration: session.configuration,
   connection: session.connection,
   livePreview: Boolean(session.configuration && session.configuration.driverMode !== 'SIMULATED' && session.connection.state === 'CONNECTED'),
-  previewVideoUrl: session.configuration?.driverMode === 'ANDROID_ADB_SCRCPY' && session.connection.state === 'CONNECTED'
+  previewVideoUrl: session.configuration?.driverMode === 'ANDROID_ADB_SCRCPY' && session.connection.state === 'CONNECTED' && options.androidVideoReady === true
     ? `/api/devices/${encodeURIComponent(session.id)}/video`
     : null,
   previewStreamUrl: session.configuration && session.configuration.driverMode !== 'SIMULATED' && session.connection.state === 'CONNECTED'
@@ -256,8 +276,9 @@ export const toDeviceSummary = (session: DeviceSession): DeviceSummaryDTO => clo
     : null,
 });
 
-export const toDeviceDetail = (session: DeviceSession): DeviceDetailDTO => cloneSnapshot({
-  ...toDeviceSummary(session),
+export const toDeviceDetail = (session: DeviceSession, options: { androidVideoReady?: boolean } = {}): DeviceDetailDTO => cloneSnapshot({
+  ...toDeviceSummary(session, options),
+  currentTask: session.currentTask,
   agentSessionId: session.agentSession.id,
   workerId: session.agentSession.workerId,
   healthState: session.healthState,
@@ -267,6 +288,27 @@ export const toDeviceDetail = (session: DeviceSession): DeviceDetailDTO => clone
   actionHistory: session.actionHistory,
   logs: session.actionHistory,
 });
+
+function toWallTask(task: TaskInstance | null): DeviceWallTaskDTO | null {
+  if (!task) return null;
+  return {
+    id: task.id,
+    batchId: task.batchId,
+    deviceId: task.deviceId,
+    goal: task.goal,
+    status: task.status,
+    priority: task.priority,
+    attempts: task.attempts,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    startedAt: task.startedAt,
+    finishedAt: task.finishedAt,
+    error: task.error,
+    maxSteps: task.maxSteps,
+    currentStepIndex: task.currentStepIndex,
+    completedSteps: task.completedSteps,
+  };
+}
 
 export const toRuntimeSnapshot = (args: {
   devices: DeviceSummaryDTO[];

@@ -1,4 +1,8 @@
 import { ControlDaemon } from './controlDaemon';
+import { loadEnvFile } from './env';
+import { makePlannerProviderFromEnv } from './plannerProviderConfig';
+
+loadEnvFile();
 
 const driverMode = process.env.OMNIDECK_DRIVER_MODE as 'SIMULATED' | 'ANDROID_ADB_SCRCPY' | 'IOS_XCUITEST' | undefined;
 const androidDriverMode = process.env.OMNIDECK_ANDROID_DRIVER_MODE as 'SIMULATED' | 'ANDROID_ADB_SCRCPY' | undefined;
@@ -23,6 +27,7 @@ const daemon = new ControlDaemon({
   iosDevices: iosUdids.length ? iosUdids.map((udid, index) => ({ udid, wdaUrl: wdaUrls[index]! })) : undefined,
   hostDiscovery: true,
   stateFilePath: process.env.OMNIDECK_STATE_FILE ?? '.omnideck/control-daemon-state.json',
+  plannerProvider: makePlannerProviderFromEnv(process.env),
 });
 const port = Number(process.env.OMNIDECK_PORT ?? 4317);
 await daemon.listen({ host: process.env.OMNIDECK_HOST ?? '127.0.0.1', port });

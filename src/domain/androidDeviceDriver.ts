@@ -23,6 +23,7 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
   private streamSignature = '';
   private streamProfile: StreamProfile | null = null;
   private displaySize: { width: number; height: number } | null = null;
+  private uiDumpUnavailable = false;
 
   constructor(readonly deviceId: string, private readonly options: AndroidDriverOptions) {
     this.runner = options.runner ?? new ProcessRunner();
@@ -75,23 +76,38 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
 
   async getUiHierarchy(signal?: AbortSignal): Promise<UiHierarchy> {
     this.requireConnected();
+    if (this.uiDumpUnavailable) return emptyUiHierarchy();
+    const dumpTimeoutMs = 2_500;
     const primaryArgs = ['exec-out', 'uiautomator', 'dump', '/dev/tty'];
-    const primary = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, ...primaryArgs], signal, timeoutMs: 8_000 });
+    const primary = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, ...primaryArgs], signal, timeoutMs: dumpTimeoutMs });
     if (primary.code === 0) {
       const hierarchy = parseUiAutomatorXml(primary.stdout, Date.now());
       if (hierarchy.nodes.length) return hierarchy;
     }
+    if (primary.code !== 0 || isMiuiThemeDumpFailure(primary.stderr, primary.stdout)) {
+      this.uiDumpUnavailable = true;
+      return emptyUiHierarchy();
+    }
 
     const fallbackPath = `/sdcard/omnideck-ui-${Date.now()}.xml`;
     const dumpArgs = ['shell', 'uiautomator', 'dump', fallbackPath];
-    const dump = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, ...dumpArgs], signal, timeoutMs: 8_000 });
-    if (dump.code !== 0) throw this.adbError('UI hierarchy dump failed', primaryArgs, primary.stderr || primary.stdout || dump.stderr || dump.stdout);
+    const dump = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, ...dumpArgs], signal, timeoutMs: dumpTimeoutMs });
+    if (dump.code !== 0) {
+      this.uiDumpUnavailable = true;
+      return emptyUiHierarchy();
+    }
     const catArgs = ['exec-out', 'cat', fallbackPath];
-    const cat = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, ...catArgs], signal, timeoutMs: 8_000 });
+    const cat = await this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, ...catArgs], signal, timeoutMs: dumpTimeoutMs });
     void this.runner.run({ command: this.adbPath, args: ['-s', this.options.serial, 'shell', 'rm', '-f', fallbackPath], signal, timeoutMs: 5_000 }).catch(() => undefined);
-    if (cat.code !== 0) throw this.adbError('UI hierarchy readback failed', catArgs, cat.stderr || cat.stdout);
+    if (cat.code !== 0) {
+      this.uiDumpUnavailable = true;
+      return emptyUiHierarchy();
+    }
     const hierarchy = parseUiAutomatorXml(cat.stdout, Date.now());
-    if (!hierarchy.nodes.length) throw this.adbError('UI hierarchy dump returned no nodes', catArgs, cat.stderr || cat.stdout || primary.stderr || primary.stdout);
+    if (!hierarchy.nodes.length) {
+      this.uiDumpUnavailable = true;
+      return emptyUiHierarchy();
+    }
     return hierarchy;
   }
 
@@ -124,7 +140,11 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
 
   async inputText(text: string, signal?: AbortSignal): Promise<void> {
     this.requireConnected();
-    await this.shell(['input', 'text', encodeAdbInputText(text)], signal);
+    const encoded = encodeAdbInputText(asciiFallbackInput(text));
+    if (!encoded) throw new Error(`ADB input text is empty after encoding for ${this.deviceId}`);
+    // Android `input text` appends; clear the focused field first so search replaces prior queries.
+    await this.shell(['input', 'keyevent', ...Array.from({ length: 24 }, () => 'KEYCODE_DEL')], signal);
+    await this.shell(['input', 'text', encoded], signal);
   }
 
   async pressKey(key: DevicePressKey, signal?: AbortSignal): Promise<void> {
@@ -214,6 +234,20 @@ export class AndroidAdbScrcpyDriver implements DeviceDriverAdapter {
   }
 
   private requireConnected(): void { if (!this.connected) throw new NativeToolError(`Android device ${this.deviceId} (${this.options.serial}) is not connected`, `${this.adbPath} -s ${this.options.serial}`); }
+}
+
+function emptyUiHierarchy(): UiHierarchy {
+  return { capturedAt: Date.now(), root: null, nodes: [] };
+}
+
+function isMiuiThemeDumpFailure(...parts: Array<string | undefined>): boolean {
+  return parts.some(part => /theme_compatibility\.xml/i.test(part ?? ''));
+}
+
+export function asciiFallbackInput(text: string): string {
+  if (/^[\x20-\x7e]+$/u.test(text)) return text;
+  const ascii = text.replace(/[^\x20-\x7e]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  return ascii || text;
 }
 
 export function encodeAdbInputText(text: string): string {

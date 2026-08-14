@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 
 type StreamStatus = 'idle' | 'connecting' | 'live' | 'failed';
 
+const VIDEO_RECONNECT_DELAYS_MS = [400, 1_000, 2_000];
+
 function buildVideoUrl(path: string, sessionRevision: number): string {
   if (path.startsWith('ws://') || path.startsWith('wss://')) return `${path}?rev=${sessionRevision}`;
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -119,6 +121,8 @@ export function useDeviceVideoStream(deviceId: string, videoPath: string | null,
     let raf = 0;
     let firstLive = false;
     let frameTimestampUs = 0;
+    let reconnectTimer = 0;
+    let reconnectAttempt = 0;
 
     const paint = () => {
       raf = 0;
@@ -197,28 +201,50 @@ export function useDeviceVideoStream(deviceId: string, videoPath: string | null,
       }));
     };
 
-    setStatus('connecting');
-    socket = new WebSocket(buildVideoUrl(videoPath, sessionRevision));
-    socket.binaryType = 'arraybuffer';
-    socket.onmessage = event => {
+    const connect = () => {
       if (closed) return;
-      const buffer = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : null;
-      if (!buffer || buffer.length < 3) return;
-      const kind = buffer[0] ?? 0;
-      const payload = buffer.subarray(2);
-      void decodePacket(kind, payload).catch(() => {
-        if (!closed) setStatus('failed');
-      });
+      setStatus(firstLive ? 'live' : 'connecting');
+      socket = new WebSocket(buildVideoUrl(videoPath, sessionRevision));
+      socket.binaryType = 'arraybuffer';
+      socket.onopen = () => {
+        reconnectAttempt = 0;
+      };
+      socket.onmessage = event => {
+        if (closed) return;
+        const buffer = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : null;
+        if (!buffer || buffer.length < 3) return;
+        const kind = buffer[0] ?? 0;
+        const payload = buffer.subarray(2);
+        void decodePacket(kind, payload).catch(() => {
+          if (!closed) scheduleReconnect();
+        });
+      };
+      socket.onerror = () => undefined;
+      socket.onclose = () => {
+        if (!closed) scheduleReconnect();
+      };
     };
-    socket.onerror = () => {
-      if (!closed) setStatus('failed');
+
+    const scheduleReconnect = () => {
+      if (closed || reconnectTimer) return;
+      const delay = VIDEO_RECONNECT_DELAYS_MS[reconnectAttempt];
+      if (delay === undefined) {
+        setStatus('failed');
+        return;
+      }
+      reconnectAttempt += 1;
+      waitingForKeyframe = true;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = 0;
+        connect();
+      }, delay);
     };
-    socket.onclose = () => {
-      if (!closed && !firstLive) setStatus('failed');
-    };
+
+    connect();
 
     return () => {
       closed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (raf) cancelAnimationFrame(raf);
       if (pendingFrame) pendingFrame.close();
       socket?.close();

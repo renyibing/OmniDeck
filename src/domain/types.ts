@@ -3,7 +3,7 @@ export type LayoutSize = (typeof LAYOUTS)[number];
 export type Platform = 'ANDROID' | 'IOS';
 export type DeviceStatus = 'ONLINE' | 'OFFLINE' | 'ERROR';
 export type AgentStatus = 'IDLE' | 'WAITING' | 'RUNNING' | 'PAUSED' | 'HUMAN_CONTROL' | 'ERROR';
-export type TaskStatus = 'IDLE' | 'WAITING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'PAUSED' | 'STOPPED' | 'DEVICE_OFFLINE';
+export type TaskStatus = 'IDLE' | 'WAITING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'PAUSED' | 'STOPPED' | 'DEVICE_OFFLINE' | 'WAITING_APPROVAL';
 export type HealthState = 'HEALTHY' | 'DEGRADED' | 'OFFLINE';
 export type StreamMode = 'BACKGROUND' | 'PREVIEW' | 'FOCUSED' | 'FULLSCREEN';
 export type DeviceConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'FAILED';
@@ -40,6 +40,33 @@ export interface TaskInstance {
   startedAt?: number;
   finishedAt?: number;
   error?: string;
+  maxSteps?: number;
+  currentStepIndex?: number;
+  completedSteps?: number;
+  failedStepIndex?: number;
+  runStartedAt?: number;
+  runEndedAt?: number;
+  lastObservationAt?: number;
+  lastVerificationAt?: number;
+  plannerProviderId?: string;
+  tokenUsage?: TaskTokenUsage;
+  latencyMs?: TaskLatencyMetrics;
+}
+
+export interface TaskTokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number | null;
+  known: boolean;
+}
+
+export interface TaskLatencyMetrics {
+  plannerMs: number;
+  actionMs: number;
+  verificationMs: number;
+  totalStepMs: number;
+  totalRunMs: number;
 }
 
 export interface TimelineEvent {
@@ -61,6 +88,7 @@ export interface TaskContext {
   goal?: string;
   step?: number;
   lastObservation?: string;
+  stepTrace?: import('./agentStepTrace').AgentStepRecord[];
   variables: Record<string, unknown>;
 }
 

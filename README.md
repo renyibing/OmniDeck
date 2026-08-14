@@ -46,6 +46,16 @@ The monitor wall supports 1, 4, 8, 9, 16, 25, and 32 channels, keyboard/mouse mu
 
 Native drivers are opt-in. The daemon refuses to create an Android driver without a serial and refuses to create an iOS driver without both UDID and WDA URL. Nothing below runs unless `OMNIDECK_ENABLE_REAL_DEVICES=true` is set.
 
+For the Tauri desktop shell, use the Android-specific dev script instead of plain `desktop:dev` when you want real Android hardware. Plain `npm run desktop:dev` keeps the daemon in simulated mode by design.
+
+```bash
+# Auto-detect authorized Android devices from `adb devices -l` and pass them to the desktop daemon.
+npm run desktop:dev:android
+
+# Or pin the desktop daemon to one explicit authorized serial.
+npm run desktop:dev:android -- --serial=<android-serial>
+```
+
 ```bash
 # One explicitly named Android device. No default ADB target is ever used.
 OMNIDECK_ENABLE_REAL_DEVICES=true \
@@ -71,3 +81,19 @@ npm run start:daemon
 Before enabling either mode, enumerate the exact serial/UDID, verify authorization or trust without changing it, and run a one-device smoke test. Do not use these switches for unreviewed batch actions.
 
 Connected native devices expose a browser preview at `/api/devices/:deviceId/frame`. When a device is in `HUMAN_CONTROL`, fullscreen preview taps are sent through `/api/devices/:deviceId/tap` as device-scoped normalized coordinates. The monitor wall refreshes this screenshot-driven preview at up to 5 FPS according to the current stream policy; AI screenshots remain a separate high-resolution path. Set `OMNIDECK_START_SCRCPY_PROCESS=true` only when the daemon should also supervise a separate no-control scrcpy process.
+
+Run the Android smoke script against exactly one authorized serial before broader testing:
+
+```bash
+# Read-only discovery/connect/UI-tree/frame readiness check.
+OMNIDECK_SMOKE_ANDROID_SERIAL=<serial> npm run smoke:android-actions
+
+# Explicitly authorized non-broadcast device actions.
+OMNIDECK_SMOKE_ANDROID_SERIAL=<serial> \
+OMNIDECK_SMOKE_ACTIONS=launch-app,home,back \
+OMNIDECK_SMOKE_CONFIRM_ACTIONS=I_AUTHORIZE_DEVICE_ACTIONS \
+OMNIDECK_SMOKE_APP_ID=com.android.settings \
+npm run smoke:android-actions
+```
+
+The smoke script reports sparse UI-tree warnings instead of failing them, because lock screens, secure apps, WebView/canvas-heavy screens, and vendor ROM overlays can legitimately expose only a root node through UIAutomator. Use the warning as a signal to fall back to screenshot grounding or to launch a known test app before selector-driven Agent validation.

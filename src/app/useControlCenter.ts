@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LAYOUTS, type DeviceGroup, type LayoutSize, type WorkspacePreset } from '../domain';
-import type { DeviceConfigurationDTO, DeviceDetailDTO, DeviceSummaryDTO, DiscoveredDeviceDTO, EventEnvelope, IOSWdaStatusDTO, RuntimeSnapshot, UiHierarchyDTO } from '../server/protocol';
-import { ControlCenterClient, type ConnectionState, type DeviceAction, type DevicePressKey, type ScreenInputSource, type ScreenTapPoint } from './controlCenterClient';
+import type { AgentStateDTO, AgentTaskTraceDTO, DeviceConfigurationDTO, DeviceDetailDTO, DeviceSummaryDTO, DiscoveredDeviceDTO, EventEnvelope, IOSWdaStatusDTO, RuntimeSnapshot, TaskAuditDTO, TaskSummaryDTO, UiHierarchyDTO } from '../server/protocol';
+import type { TaskStatus } from '../domain/types';
+import { ControlCenterClient, type ConnectionState, type DeviceAction, type DevicePressKey, type ScreenInputSource, type ScreenTapPoint, type TaskArtifactsResponse } from './controlCenterClient';
 import { reorderDeviceIds, sortDevicesForWall } from './deviceOrdering';
 import { swipeDurationMs, handleDeviceScreenKeyDown } from './useDeviceScreenGestures';
 
@@ -52,6 +53,19 @@ export function useControlCenter() {
   const [wdaStatuses, setWdaStatuses] = useState<Record<string, IOSWdaStatusDTO>>({});
   const [uiTree, setUiTree] = useState<{ deviceId: string; tree: UiHierarchyDTO } | null>(null);
   const [uiTreeLoading, setUiTreeLoading] = useState(false);
+  const [agentState, setAgentState] = useState<AgentStateDTO | null>(null);
+  const [taskAudit, setTaskAudit] = useState<{ deviceId: string; taskId: string; trace: AgentTaskTraceDTO[]; artifacts: TaskArtifactsResponse['artifacts']; summary: TaskArtifactsResponse['summary'] } | null>(null);
+  const [taskAuditLoading, setTaskAuditLoading] = useState(false);
+  const [activeView, setActiveView] = useState<'MONITOR' | 'TASK_CENTER'>('MONITOR');
+  const [taskList, setTaskList] = useState<TaskSummaryDTO[]>([]);
+  const [taskListTotal, setTaskListTotal] = useState(0);
+  const [taskListLoading, setTaskListLoading] = useState(false);
+  const [taskFilterStatus, setTaskFilterStatus] = useState<TaskStatus | 'ALL'>('ALL');
+  const [taskFilterDeviceId, setTaskFilterDeviceId] = useState<string>('ALL');
+  const [taskCenterSelectedTaskId, setTaskCenterSelectedTaskId] = useState<string | null>(null);
+  const [taskCenterAudit, setTaskCenterAudit] = useState<TaskAuditDTO | null>(null);
+  const [taskCenterAuditLoading, setTaskCenterAuditLoading] = useState(false);
+  const [taskListVersion, setTaskListVersion] = useState(0);
   const [connectionPanelOpen, setConnectionPanelOpen] = useState(false);
   const [discoveryState, setDiscoveryState] = useState<'idle' | 'detecting' | 'ready' | 'failed'>('idle');
   const [workspaceName, setWorkspaceName] = useState('');
@@ -75,6 +89,7 @@ export function useControlCenter() {
   const visibleDeviceKey = visibleDevices.map(device => device.id).join(',');
   const selectedSummary = devices.find(device => device.id === selectedId) ?? null;
   const selectedDevice = selectedSummary && detail?.id === selectedSummary.id ? { ...selectedSummary, ...detail } : selectedSummary;
+  const selectedDeviceTaskId = selectedDevice?.currentTask?.id ?? agentState?.taskInstanceId ?? null;
 
   const refreshWdaStatus = useCallback((deviceId: string) => {
     void client.getWdaStatus(deviceId).then(status => {
@@ -115,6 +130,7 @@ export function useControlCenter() {
         setRuntime(current => current ? { ...current, server: { ...current.server, latestSequence: event.sequence } } : current);
       }
       if (event.deviceId === selectedIdRef.current) setDetailVersion(version => version + 1);
+      if (event.type.startsWith('TASK_')) setTaskListVersion(version => version + 1);
     }
   }, [client]);
 
@@ -125,7 +141,62 @@ export function useControlCenter() {
     return () => controller.abort();
   }, [client, selectedId, detailVersion]);
 
+  useEffect(() => {
+    if (!selectedId) { setAgentState(null); return; }
+    const controller = new AbortController();
+    void client.getAgentState(selectedId, controller.signal).then(setAgentState).catch(() => undefined);
+    return () => controller.abort();
+  }, [client, selectedId, detailVersion]);
+
+  useEffect(() => {
+    if (!selectedId || !selectedDeviceTaskId) { setTaskAudit(null); setTaskAuditLoading(false); return; }
+    const controller = new AbortController();
+    setTaskAuditLoading(true);
+    void Promise.all([
+      client.getTaskTrace(selectedId, selectedDeviceTaskId, controller.signal),
+      client.getTaskArtifacts(selectedId, selectedDeviceTaskId, controller.signal),
+    ]).then(([trace, artifacts]) => {
+      setTaskAudit({ deviceId: selectedId, taskId: selectedDeviceTaskId, trace, artifacts: artifacts.artifacts, summary: artifacts.summary });
+    }).catch(() => undefined)
+      .finally(() => { if (!controller.signal.aborted) setTaskAuditLoading(false); });
+    return () => controller.abort();
+  }, [client, selectedId, selectedDeviceTaskId, detailVersion]);
+
+  useEffect(() => {
+    if (activeView !== 'TASK_CENTER') return;
+    const controller = new AbortController();
+    setTaskListLoading(true);
+    void client.getTasks({
+      status: taskFilterStatus,
+      deviceId: taskFilterDeviceId === 'ALL' ? undefined : taskFilterDeviceId,
+      limit: 100,
+    }, controller.signal).then(result => {
+      setTaskList(result.tasks);
+      setTaskListTotal(result.total);
+      if (taskCenterSelectedTaskId && !result.tasks.some(task => task.taskId === taskCenterSelectedTaskId)) {
+        setTaskCenterSelectedTaskId(result.tasks[0]?.taskId ?? null);
+      } else if (!taskCenterSelectedTaskId && result.tasks[0]) {
+        setTaskCenterSelectedTaskId(result.tasks[0].taskId);
+      }
+    }).catch(error => {
+      if (!isAbortError(error)) setToast(error instanceof Error ? error.message : 'Task list unavailable');
+    }).finally(() => { if (!controller.signal.aborted) setTaskListLoading(false); });
+    return () => controller.abort();
+  }, [activeView, client, taskFilterStatus, taskFilterDeviceId, taskListVersion]);
+
+  useEffect(() => {
+    if (activeView !== 'TASK_CENTER' || !taskCenterSelectedTaskId) { setTaskCenterAudit(null); setTaskCenterAuditLoading(false); return; }
+    const controller = new AbortController();
+    setTaskCenterAuditLoading(true);
+    void client.getTaskAudit(taskCenterSelectedTaskId, controller.signal).then(setTaskCenterAudit)
+      .catch(error => { if (!isAbortError(error)) setToast(error instanceof Error ? error.message : 'Task audit unavailable'); })
+      .finally(() => { if (!controller.signal.aborted) setTaskCenterAuditLoading(false); });
+    return () => controller.abort();
+  }, [activeView, client, taskCenterSelectedTaskId, taskListVersion, detailVersion]);
+
   useEffect(() => { setUiTree(null); }, [selectedId]);
+  useEffect(() => { setAgentState(null); }, [selectedId]);
+  useEffect(() => { setTaskAudit(null); }, [selectedId]);
 
   useEffect(() => {
     if (!selectedSummary || selectedSummary.platform !== 'IOS') return;
@@ -307,6 +378,24 @@ export function useControlCenter() {
       .finally(() => setUiTreeLoading(false));
   }, [client]);
 
+  const approveTask = useCallback((id: string, taskId: string) => {
+    void client.approveTask(id, taskId).then(state => {
+      setAgentState(state);
+      setDetailVersion(version => version + 1);
+      setTaskListVersion(version => version + 1);
+      setToast('Approval granted for this device task');
+    }).catch(error => setToast(error instanceof Error ? error.message : 'Approve failed'));
+  }, [client]);
+
+  const rejectTask = useCallback((id: string, taskId: string) => {
+    void client.rejectTask(id, taskId).then(state => {
+      setAgentState(state);
+      setDetailVersion(version => version + 1);
+      setTaskListVersion(version => version + 1);
+      setToast('Approval rejected for this device task');
+    }).catch(error => setToast(error instanceof Error ? error.message : 'Reject failed'));
+  }, [client]);
+
   const discoverDevices = useCallback(() => {
     setDiscoveryState('detecting');
     void client.discoverDevices().then(found => {
@@ -478,14 +567,16 @@ export function useControlCenter() {
 
   return {
     devices, groups, workspaces, activeWorkspaceId, groupId, layout, visibleDevices, selectedIds, focusedId, fullscreenId, wallOnly,
-    selectedDevice, stats, workerSnapshot: runtime?.workers ?? { active: 0, queued: 0, completed: 0 }, connection, workspaceName, toast,
+    selectedDevice, stats, workerSnapshot: runtime?.workers ?? { active: 0, queued: 0, completed: 0 }, connection, workspaceName, toast, activeView,
     setLayout: setLayoutState, setGroupId, setWorkspace, selectDevice, focusDeviceForControl, toggleCheckbox, selectAll, clearSelection, closeInspector,
-    setFullscreenId, setWallOnly, runBatch, applyBatchAction, toggleOffline,     takeHumanControl: takeHumanControlDevice,
+    setFullscreenId, setWallOnly, setActiveView, runBatch, applyBatchAction, toggleOffline, takeHumanControl: takeHumanControlDevice,
     releaseHumanControl: releaseHumanControlDevice,
     pauseDevice: (id: string) => sendAction(id, 'pause'), resumeDevice: (id: string) => sendAction(id, 'resume'), retryDevice: (id: string) => sendAction(id, 'retry'),
     setWorkspaceName, saveWorkspace, createCustomGroup, discoveredDevices, connectionPanelOpen, setConnectionPanelOpen,
     discoveryState, discoverDevices, configureDevice, connectDevice, disconnectConfiguredDevice, tapDevice, swipeDevice, longPressDevice, scrollDevice, previewInputText, previewPressKey, reorderVisibleDevices, wdaStatuses, refreshWdaStatus,
     manualBack, manualHome, manualInputText, manualLongPress, manualSwipe, manualStopApp, refreshUiTree, uiTree: uiTree?.deviceId === selectedId ? uiTree.tree : null, uiTreeLoading,
+    agentState: agentState?.deviceId === selectedId ? agentState : null, taskAudit: taskAudit?.deviceId === selectedId && taskAudit.taskId === selectedDeviceTaskId ? taskAudit : null, taskAuditLoading, approveTask, rejectTask,
+    taskList, taskListTotal, taskListLoading, taskFilterStatus, setTaskFilterStatus, taskFilterDeviceId, setTaskFilterDeviceId, taskCenterSelectedTaskId, setTaskCenterSelectedTaskId, taskCenterAudit, taskCenterAuditLoading,
   };
 }
 

@@ -144,7 +144,7 @@ export class DeviceManager {
 
   private makeInitialTask(deviceId: string, index: number): TaskInstance {
     const now = Date.now();
-    return { id: `seed-task-${index}`, deviceId, goal: 'Verify account dashboard', status: 'RUNNING', priority: 1, attempts: 0, createdAt: now, updatedAt: now };
+    return { id: `seed-task-${index}`, deviceId, goal: 'Verify account dashboard', status: 'RUNNING', priority: 1, attempts: 0, createdAt: now, updatedAt: now, maxSteps: 10, currentStepIndex: 2, completedSteps: 2 };
   }
 
   private seedHistory(index: number, task: TaskInstance | null) {

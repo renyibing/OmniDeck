@@ -1,4 +1,5 @@
 type JsonObject = Record<string, unknown>;
+type SmokeUiNode = JsonObject & { text?: string; resourceId?: string; contentDesc?: string; className?: string; packageName?: string; clickable?: boolean; enabled?: boolean; children?: SmokeUiNode[] };
 
 const daemonUrl = (process.env.OMNIDECK_DAEMON_URL ?? 'http://127.0.0.1:4317').replace(/\/+$/, '');
 const targetSerial = process.env.OMNIDECK_SMOKE_ANDROID_SERIAL?.trim();
@@ -46,7 +47,8 @@ await post(`/api/devices/${encodeURIComponent(deviceId)}/take-control`, command(
 
 const beforeTree = await getUiTree(deviceId);
 assertNonEmptyUiTree(beforeTree, 'before actions');
-console.log(`UI tree reachable before actions: ${beforeTree.nodes.length} nodes`);
+reportUiTreeQuality(beforeTree, 'before actions');
+await assertPreviewFrame(deviceId);
 await assertRuntimeSummaryIsLightweight(deviceId);
 
 if (!actionList.length) {
@@ -63,7 +65,7 @@ const detail = await requestJson(`/api/devices/${encodeURIComponent(deviceId)}`)
 const history = JSON.stringify((detail.device as JsonObject | undefined)?.actionHistory ?? []);
 if (actionList.includes('input-text') && history.includes(textInput)) fail('ActionHistory leaked raw input text.');
 assertActionHistory(actionList, history);
-console.log(`UI tree reachable after actions: ${afterTree.nodes.length} nodes`);
+reportUiTreeQuality(afterTree, 'after actions');
 console.log('Android action smoke completed without cross-device or summary UI-tree leakage checks failing.');
 
 async function discoverAndroidCandidate(): Promise<JsonObject> {
@@ -83,6 +85,9 @@ async function runAction(deviceId: string, action: string): Promise<void> {
     case 'back':
     case 'home':
       await post(`/api/devices/${encodeURIComponent(deviceId)}/${action}`, command(deviceId, action));
+      break;
+    case 'launch-app':
+      await post(`/api/devices/${encodeURIComponent(deviceId)}/launch-app`, { ...command(deviceId, action), appId });
       break;
     case 'swipe-up':
       await post(`/api/devices/${encodeURIComponent(deviceId)}/swipe`, { ...command(deviceId, action), from: { x: 0.5, y: 0.78 }, to: { x: 0.5, y: 0.28 }, durationMs: 360, source: 'INSPECTOR' });
@@ -105,15 +110,38 @@ async function runAction(deviceId: string, action: string): Promise<void> {
   console.log(`Executed ${action} on ${deviceId}`);
 }
 
-async function getUiTree(deviceId: string): Promise<{ nodes: unknown[] }> {
+async function getUiTree(deviceId: string): Promise<{ nodes: SmokeUiNode[]; root: SmokeUiNode | null }> {
   const result = await requestJson(`/api/devices/${encodeURIComponent(deviceId)}/ui-tree`);
-  const uiTree = result.uiTree as { nodes?: unknown[] } | undefined;
+  const uiTree = result.uiTree as { nodes?: SmokeUiNode[]; root?: SmokeUiNode | null } | undefined;
   if (!Array.isArray(uiTree?.nodes)) fail('UI tree response did not include nodes.');
-  return { nodes: uiTree.nodes };
+  return { nodes: uiTree.nodes, root: uiTree.root ?? null };
 }
 
 function assertNonEmptyUiTree(tree: { nodes: unknown[] }, phase: string): void {
   if (!tree.nodes.length) fail(`UI tree was empty ${phase}; real Android UIAutomator should expose at least the root node.`);
+}
+
+function reportUiTreeQuality(tree: { nodes: SmokeUiNode[]; root: SmokeUiNode | null }, phase: string): void {
+  const actionable = tree.nodes.filter(node => node.clickable || node.text || node.resourceId || node.contentDesc).length;
+  const root = tree.root;
+  const rootLabel = root ? `${root.packageName ?? 'unknown-package'} ${root.className ?? 'unknown-class'}`.trim() : 'no-root';
+  const warning = tree.nodes.length <= 1 || actionable === 0 ? ' warning=SPARSE_UI_TREE' : '';
+  console.log(`UI tree reachable ${phase}: nodes=${tree.nodes.length} actionable=${actionable} root=${rootLabel}${warning}`);
+  if (warning) {
+    console.log('UIAutomator exposed a sparse tree. This can happen on lock screen, secure apps, WebView/canvas-heavy screens, or vendor ROM overlays; use launch-app/home or screenshot grounding fallback for this state.');
+  }
+}
+
+async function assertPreviewFrame(deviceId: string): Promise<void> {
+  const response = await fetch(`${daemonUrl}/api/devices/${encodeURIComponent(deviceId)}/frame`);
+  if (!response.ok) fail(`GET /api/devices/${deviceId}/frame failed (${response.status})`);
+  const contentType = response.headers.get('content-type') ?? '';
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!contentType.includes('image/png')) fail(`Preview frame content-type was ${contentType || 'missing'}, expected image/png.`);
+  if (bytes.length < 1_024) fail(`Preview frame was too small (${bytes.length} bytes).`);
+  const pngMagic = [0x89, 0x50, 0x4e, 0x47];
+  if (!pngMagic.every((value, index) => bytes[index] === value)) fail('Preview frame did not start with PNG magic bytes.');
+  console.log(`Preview frame reachable: contentType=${contentType} bytes=${bytes.length}`);
 }
 
 function assertActionHistory(actions: string[], history: string): void {
@@ -122,6 +150,7 @@ function assertActionHistory(actions: string[], history: string): void {
     if (action === 'long-press') return 'action=long_press';
     if (action === 'input-text') return 'action=input_text';
     if (action === 'stop-app') return 'action=stop_app';
+    if (action === 'launch-app') return 'action=launch_app';
     return `action=${action}`;
   }));
   expected.forEach(fragment => {
@@ -136,6 +165,9 @@ async function assertRuntimeSummaryIsLightweight(deviceId: string): Promise<void
   const summary = devices.find(device => device.id === deviceId);
   if (!summary) fail(`Runtime summary missing ${deviceId}.`);
   if ('uiTree' in summary) fail('DeviceSummaryDTO leaked uiTree into /api/runtime.');
+  const summaryText = JSON.stringify(summary);
+  if (summaryText.includes('stepTrace') || summaryText.includes('redactedPayload')) fail('DeviceSummaryDTO leaked detail-only trace/artifact fields into /api/runtime.');
+  if (summaryText.includes('tokenUsage') || summaryText.includes('estimatedCostUsd') || summaryText.includes('latencyMs')) fail('DeviceSummaryDTO leaked task telemetry into /api/runtime wall summary.');
 }
 
 function command(deviceId: string, action: string): JsonObject {
@@ -177,7 +209,7 @@ Read-only readiness/UI-tree check:
 
 Authorized action check:
   OMNIDECK_SMOKE_ANDROID_SERIAL=<serial> \\
-  OMNIDECK_SMOKE_ACTIONS=back,home,swipe-up,swipe-down,long-press,input-text,stop-app \\
+  OMNIDECK_SMOKE_ACTIONS=launch-app,back,home,swipe-up,swipe-down,long-press,input-text,stop-app \\
   OMNIDECK_SMOKE_CONFIRM_ACTIONS=I_AUTHORIZE_DEVICE_ACTIONS \\
   npm run smoke:android-actions
 
@@ -185,5 +217,9 @@ Optional:
   OMNIDECK_DAEMON_URL=http://127.0.0.1:4317
   OMNIDECK_SMOKE_DEVICE_ID=device-01
   OMNIDECK_SMOKE_TEXT="OmniDeck smoke"
-  OMNIDECK_SMOKE_APP_ID=com.android.settings`);
+  OMNIDECK_SMOKE_APP_ID=com.android.settings
+
+Notes:
+  - launch-app starts OMNIDECK_SMOKE_APP_ID through the daemon route.
+  - Sparse UI tree warnings are reported but not failed because lock screens, secure apps, WebView/canvas-heavy screens, and vendor ROM overlays may intentionally expose limited UIAutomator data.`);
 }

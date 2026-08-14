@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AndroidAdbScrcpyDriver } from '../domain/androidDeviceDriver';
+import { SimulatedDeviceDriver } from '../domain/deviceDriver';
 import { NativeToolError } from '../domain/nativeProcess';
 import { ControlDaemon } from './controlDaemon';
 
@@ -23,6 +24,15 @@ async function json(baseUrl: string, path: string, init?: RequestInit) {
   const response = await fetch(`${baseUrl}${path}`, init);
   const body = await response.json() as Record<string, unknown>;
   return { response, body };
+}
+
+async function waitForHttp(condition: () => Promise<boolean>, timeoutMs = 500): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  if (!(await condition())) throw new Error('Timed out waiting for HTTP condition');
 }
 
 function postBody(command: unknown): RequestInit {
@@ -48,6 +58,44 @@ describe('Control Daemon HTTP/SSE protocol', () => {
     expect(daemon.discovery.getByDeviceId('device-01')?.simulated).toBe(false);
     expect(daemon.drivers.get('device-03')).not.toBeInstanceOf(AndroidAdbScrcpyDriver);
     expect(daemon.discovery.getByDeviceId('device-03')).toBeUndefined();
+  });
+
+  it('keeps Android connected and starts frame fallback when scrcpy video startup fails', async () => {
+    const daemon = new ControlDaemon({ autoExecute: false, healthCheckIntervalMs: 0 });
+    daemons.push(daemon);
+    const session = daemon.devices.get('device-01')!;
+    daemon.devices.configure('device-01', {
+      deviceId: 'device-01',
+      platform: 'ANDROID',
+      name: 'Fallback Android',
+      identifier: 'serial-01',
+      appId: 'com.android.settings',
+      transport: 'ADB',
+      orientation: 'PORTRAIT',
+      driverMode: 'ANDROID_ADB_SCRCPY',
+      configuredAt: Date.now(),
+    });
+    const mutableDaemon = daemon as unknown as { ensureDriver: (deviceId: string) => Promise<void> };
+    mutableDaemon.ensureDriver = async () => {
+      const driver = new SimulatedDeviceDriver(session) as SimulatedDeviceDriver & { monitorFrame: () => Promise<{ deviceId: string; capturedAt: number; contentType: 'image/png'; data: Buffer }> };
+      driver.monitorFrame = async () => ({ deviceId: 'device-01', capturedAt: Date.now(), contentType: 'image/png', data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) });
+      await daemon.drivers.replace(driver);
+    };
+    daemon.scrcpyVideos.ensure = async () => {
+      throw new Error('scrcpy video socket closed');
+    };
+
+    const summary = await daemon.connectDevice('device-01');
+    const frame = await daemon.previews.waitForFrame('device-01');
+    const runtimeDevice = daemon.snapshot().devices.find(device => device.id === 'device-01');
+
+    expect(summary.connection.state).toBe('CONNECTED');
+    expect(summary.previewVideoUrl).toBeNull();
+    expect(summary.previewStreamUrl).toBe('/api/devices/device-01/mjpeg');
+    expect(runtimeDevice?.previewVideoUrl).toBeNull();
+    expect(runtimeDevice?.previewStreamUrl).toBe('/api/devices/device-01/mjpeg');
+    expect(frame.contentType).toBe('image/png');
+    expect(frame.data.length).toBeGreaterThan(0);
   });
 
   it('binds one Android and two iOS devices without reusing a device session', async () => {
@@ -217,6 +265,11 @@ describe('Control Daemon HTTP/SSE protocol', () => {
     expect(devices[0]).not.toHaveProperty('actionHistory');
     expect(devices[0]).not.toHaveProperty('taskContext');
     expect(devices[0]).not.toHaveProperty('uiTree');
+    expect(JSON.stringify(devices[0])).not.toContain('stepTrace');
+    expect(JSON.stringify(devices[0])).not.toContain('recentStepRecords');
+    expect(JSON.stringify(devices[0])).not.toContain('plannerProviderId');
+    expect(JSON.stringify(devices[0])).not.toContain('artifacts');
+    expect(JSON.stringify(devices[0])).not.toContain('redactedPayload');
     expect(devices[0]).toHaveProperty('queuedTaskCount');
     expect(devices[0].sessionRevision).toBe(1);
   });
@@ -333,6 +386,9 @@ describe('Control Daemon HTTP/SSE protocol', () => {
     expect(config.maxConcurrentAI).toBe(8);
     expect(config.maxConcurrentVLM).toBe(4);
     expect(workers.active).toBeLessThanOrEqual(8);
+    expect(JSON.stringify(runtime.body.devices)).not.toContain('tokenUsage');
+    expect(JSON.stringify(runtime.body.devices)).not.toContain('estimatedCostUsd');
+    expect(JSON.stringify(runtime.body.devices)).not.toContain('latencyMs');
   });
 
   it('replays ordered events from a sequence and keeps the event sequence monotonic', async () => {
@@ -424,6 +480,107 @@ describe('Control Daemon HTTP/SSE protocol', () => {
     expect(history).toContain('redactedLength=15');
     expect(history).not.toContain('secret password');
     expect(siblingHistory).not.toContain('input_text');
+  });
+
+  it('exposes agent step state only through selected-device agent-state and validates approval target IDs', async () => {
+    const { baseUrl } = await start({ autoExecute: true });
+    await json(baseUrl, '/api/devices/device-01/stop', postBody({ commandId: 'stop-before-approval-test', timestamp: Date.now(), deviceId: 'device-01' }));
+    const batch = await json(baseUrl, '/api/tasks/batch', postBody({
+      commandId: 'sensitive-agent-task-1',
+      timestamp: Date.now(),
+      targetDeviceIds: ['device-01'],
+      goal: '点赞一下',
+      priority: 1,
+    }));
+    const task = ((batch.body.tasks as Array<Record<string, unknown>>)[0]);
+    const taskId = task.id as string;
+
+    await waitForHttp(async () => {
+      const state = await json(baseUrl, '/api/devices/device-01/agent-state');
+      return (state.body.agentState as Record<string, unknown>).status === 'WAITING_APPROVAL';
+    });
+
+    const runtime = await json(baseUrl, '/api/runtime');
+    const summary = (runtime.body.devices as Array<Record<string, unknown>>).find(device => device.id === 'device-01') as Record<string, unknown>;
+    const state = await json(baseUrl, '/api/devices/device-01/agent-state');
+    const trace = await json(baseUrl, `/api/devices/device-01/tasks/${encodeURIComponent(taskId)}/trace?limit=2`);
+    const artifacts = await json(baseUrl, `/api/devices/device-01/tasks/${encodeURIComponent(taskId)}/artifacts?limit=2`);
+    const routeMismatch = await json(baseUrl, `/api/devices/device-02/tasks/${encodeURIComponent(taskId)}/artifacts`);
+    const mismatch = await json(baseUrl, `/api/devices/device-01/tasks/${taskId}/approve`, postBody({ commandId: 'approval-mismatch-1', timestamp: Date.now(), deviceId: 'device-02', taskId }));
+    const approveCommand = { commandId: 'approval-ok-1', timestamp: Date.now(), deviceId: 'device-01', taskId };
+    const approved = await json(baseUrl, `/api/devices/device-01/tasks/${taskId}/approve`, postBody(approveCommand));
+    const approvedRetry = await json(baseUrl, `/api/devices/device-01/tasks/${taskId}/approve`, postBody(approveCommand));
+    const postApprovalArtifacts = await json(baseUrl, `/api/devices/device-01/tasks/${encodeURIComponent(taskId)}/artifacts`);
+
+    expect(summary).not.toHaveProperty('uiTree');
+    expect(summary).not.toHaveProperty('taskContext');
+    expect(JSON.stringify(summary)).not.toContain('pendingApproval');
+    expect(JSON.stringify(summary)).not.toContain('lastPlannedAction');
+    expect(JSON.stringify(summary)).not.toContain('recentStepRecords');
+    expect(JSON.stringify(summary)).not.toContain('artifacts');
+    expect(JSON.stringify(summary)).not.toContain('redactedPayload');
+    expect((state.body.agentState as Record<string, unknown>).pendingApproval).toMatchObject({ type: 'request_human' });
+    expect(((state.body.agentState as Record<string, unknown>).recentStepRecords as unknown[]).length).toBeGreaterThan(0);
+    expect(JSON.stringify(state.body.agentState)).toContain('WAITING_APPROVAL');
+    expect(trace.response.status).toBe(200);
+    expect((trace.body.trace as Array<Record<string, unknown>>).length).toBeLessThanOrEqual(2);
+    expect((trace.body.trace as Array<Record<string, unknown>>).every(record => record.deviceId === 'device-01' && record.taskInstanceId === taskId)).toBe(true);
+    expect(artifacts.response.status).toBe(200);
+    expect((artifacts.body.artifacts as Array<Record<string, unknown>>).length).toBeLessThanOrEqual(2);
+    expect((artifacts.body.artifacts as Array<Record<string, unknown>>).every(artifact => artifact.deviceId === 'device-01' && artifact.taskInstanceId === taskId)).toBe(true);
+    expect(JSON.stringify(artifacts.body.artifacts)).not.toMatch(/"data"\s*:/u);
+    expect(routeMismatch.response.status).toBe(400);
+    expect(mismatch.response.status).toBe(400);
+    expect(approved.response.status).toBe(200);
+    expect(approvedRetry.body).toEqual(approved.body);
+    expect((postApprovalArtifacts.body.artifacts as Array<Record<string, unknown>>).some(artifact => artifact.type === 'APPROVAL_DECISION')).toBe(true);
+  });
+
+  it('exposes a lightweight Task Center index and selected-task audit routes', async () => {
+    const { baseUrl } = await start({ autoExecute: true });
+    await json(baseUrl, '/api/devices/device-01/stop', postBody({ commandId: 'stop-before-task-center', timestamp: Date.now(), deviceId: 'device-01' }));
+    const batch = await json(baseUrl, '/api/tasks/batch', postBody({
+      commandId: 'task-center-sensitive-1',
+      timestamp: Date.now(),
+      targetDeviceIds: ['device-01'],
+      goal: '点赞一下',
+      priority: 1,
+    }));
+    const taskId = ((batch.body.tasks as Array<Record<string, unknown>>)[0].id as string);
+
+    await waitForHttp(async () => {
+      const result = await json(baseUrl, '/api/tasks?status=WAITING_APPROVAL');
+      return (result.body.tasks as Array<Record<string, unknown>>).some(task => task.taskId === taskId);
+    });
+
+    const list = await json(baseUrl, '/api/tasks?limit=10');
+    const filtered = await json(baseUrl, '/api/tasks?status=WAITING_APPROVAL');
+    const badFilter = await json(baseUrl, '/api/tasks?status=BROADCAST');
+    const audit = await json(baseUrl, `/api/tasks/${encodeURIComponent(taskId)}/audit?limit=2`);
+    const deviceAudit = await json(baseUrl, `/api/devices/device-01/tasks/${encodeURIComponent(taskId)}/audit?limit=2`);
+    const mismatch = await json(baseUrl, `/api/devices/device-02/tasks/${encodeURIComponent(taskId)}/audit`);
+    const approve = await json(baseUrl, `/api/devices/device-01/tasks/${encodeURIComponent(taskId)}/approve`, postBody({ commandId: 'task-center-approve-1', timestamp: Date.now(), deviceId: 'device-01', taskId }));
+    const approvedAudit = await json(baseUrl, `/api/tasks/${encodeURIComponent(taskId)}/audit`);
+    const summary = (list.body.tasks as Array<Record<string, unknown>>).find(task => task.taskId === taskId) as Record<string, unknown>;
+
+    expect(list.response.status).toBe(200);
+    expect(summary).toMatchObject({ taskId, deviceId: 'device-01', status: 'WAITING_APPROVAL', requiresApproval: true, approvalStatus: 'PENDING' });
+    expect(summary).not.toHaveProperty('trace');
+    expect(summary).not.toHaveProperty('artifacts');
+    expect(JSON.stringify(summary)).not.toContain('stepTrace');
+    expect(JSON.stringify(summary)).not.toContain('redactedPayload');
+    expect(JSON.stringify(summary)).not.toContain('uiTree');
+    expect((filtered.body.tasks as Array<Record<string, unknown>>).every(task => task.status === 'WAITING_APPROVAL')).toBe(true);
+    expect(badFilter.response.status).toBe(400);
+    expect(audit.response.status).toBe(200);
+    expect((audit.body.audit as Record<string, unknown>).task).toMatchObject({ taskId, deviceId: 'device-01' });
+    expect(((audit.body.audit as Record<string, unknown>).trace as Array<Record<string, unknown>>).length).toBeLessThanOrEqual(2);
+    expect(((audit.body.audit as Record<string, unknown>).artifacts as Array<Record<string, unknown>>).length).toBeLessThanOrEqual(2);
+    expect(JSON.stringify((audit.body.audit as Record<string, unknown>).artifacts)).not.toMatch(/"data"\s*:/u);
+    expect(deviceAudit.body.audit).toEqual(audit.body.audit);
+    expect(mismatch.response.status).toBe(400);
+    expect(approve.response.status).toBe(200);
+    expect(((approvedAudit.body.audit as Record<string, unknown>).artifacts as Array<Record<string, unknown>>).some(artifact => artifact.type === 'APPROVAL_DECISION')).toBe(true);
   });
 
   it('returns redacted driver diagnostics for failed manual Android actions', async () => {

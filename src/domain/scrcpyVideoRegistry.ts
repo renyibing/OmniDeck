@@ -48,6 +48,10 @@ export class ScrcpyVideoRegistry {
     await current.ensure(profile);
   }
 
+  isStarted(deviceId: string): boolean {
+    return this.sessions.get(deviceId)?.isStarted() ?? false;
+  }
+
   async stop(deviceId: string): Promise<void> {
     const session = this.sessions.get(deviceId);
     if (!session) return;
@@ -70,10 +74,14 @@ export class ScrcpyVideoRegistry {
       if (socket.readyState !== socket.OPEN) return;
       // Prefer freshness over completeness when a slow client falls behind.
       if (packet.kind === 'delta' && socket.bufferedAmount > MAX_BUFFERED_BYTES) return;
-      const header = Buffer.alloc(2);
-      header[0] = packet.kind === 'config' ? 0 : packet.kind === 'key' ? 1 : 2;
-      header[1] = 0;
-      socket.send(Buffer.concat([header, packet.data]));
+      try {
+        const header = Buffer.alloc(2);
+        header[0] = packet.kind === 'config' ? 0 : packet.kind === 'key' ? 1 : 2;
+        header[1] = 0;
+        socket.send(Buffer.concat([header, packet.data]));
+      } catch {
+        // Viewer already closed (Vite proxy EPIPE / browser refresh).
+      }
     };
 
     const unsubscribe = session.subscribe(send);

@@ -7,12 +7,13 @@ import { SessionManager } from './sessionManager';
 import { StreamManager } from './streamManager';
 import { TaskScheduler } from './taskScheduler';
 import type { ConcurrencyConfig, TaskInstance } from './types';
-import { AndroidAdbScrcpyDriver, encodeAdbInputText } from './androidDeviceDriver';
+import { AndroidAdbScrcpyDriver, asciiFallbackInput, encodeAdbInputText } from './androidDeviceDriver';
 import { IOSXCUITestDriver } from './iosXcuitestDriver';
 import { NativeToolError, ProcessRunner } from './nativeProcess';
 import { EventEmitter } from 'node:events';
 import { encodeRgbaPng, scaleRgbaToMaxDimension } from './pngEncoder';
-import type { UiHierarchy } from './androidUiHierarchy';
+import { parseUiAutomatorXml, type UiHierarchy } from './androidUiHierarchy';
+import type { AgentPlannerProvider } from './agentPlannerProvider';
 
 const config: ConcurrencyConfig = { maxConcurrentAI: 8, maxConcurrentVLM: 4, maxConcurrentADB: 12, maxConcurrentIOS: 4, timeoutMs: 90_000, maxRetries: 2 };
 
@@ -175,6 +176,7 @@ describe('native driver boundaries', () => {
 
     expect(calls.every(call => call.args[0] === '-s' && call.args[1] === 'serial-01')).toBe(true);
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 exec-out uiautomator dump /dev/tty');
+    expect(calls.map(call => call.args.join(' '))).toContain(`-s serial-01 shell input keyevent ${Array.from({ length: 24 }, () => 'KEYCODE_DEL').join(' ')}`);
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell input text hello%sworld%s\\&%sok');
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell input keyevent KEYCODE_BACK');
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell input keyevent KEYCODE_HOME');
@@ -182,6 +184,7 @@ describe('native driver boundaries', () => {
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell input keyevent KEYCODE_ENTER');
     expect(calls.map(call => call.args.join(' '))).toContain('-s serial-01 shell am force-stop com.example');
     expect(encodeAdbInputText('a b')).toBe('a%sb');
+    expect(asciiFallbackInput('苹果Mac mini M4 16G')).toBe('Mac mini M4 16G');
   });
 
   it('falls back to a scoped UIAutomator file dump when /dev/tty returns no XML', async () => {
@@ -212,9 +215,41 @@ describe('native driver boundaries', () => {
     expect(scoped.some(call => call.includes('shell rm -f /sdcard/omnideck-ui-'))).toBe(true);
   });
 
-  it('reports a diagnostic error when UIAutomator returns no nodes', async () => {
+  it('returns an empty hierarchy immediately when MIUI theme dump is unavailable', async () => {
+    const calls: Array<{ args: string[] }> = [];
     const runner = {
       run: vi.fn(async (options: { args: string[] }) => {
+        calls.push(options);
+        const joined = options.args.join(' ');
+        if (joined.includes('get-state')) return { code: 0, stdout: 'device\n', stderr: '' };
+        if (joined.includes('exec-out uiautomator dump /dev/tty')) {
+          return {
+            code: 1,
+            stdout: '',
+            stderr: 'java.io.FileNotFoundException: /data/system/theme_config/theme_compatibility.xml: open failed: ENOENT',
+          };
+        }
+        return { code: 1, stdout: '', stderr: `unexpected ${joined}` };
+      }),
+      spawn: vi.fn(),
+    } as unknown as ProcessRunner;
+    const driver = new AndroidAdbScrcpyDriver('device-01', { serial: 'serial-01', runner });
+
+    await driver.connect();
+    const first = await driver.getUiHierarchy();
+    const second = await driver.getUiHierarchy();
+    const dumpCalls = calls.filter(call => call.args.includes('uiautomator'));
+
+    expect(first.nodes).toEqual([]);
+    expect(second.nodes).toEqual([]);
+    expect(dumpCalls).toHaveLength(1);
+  });
+
+  it('caches an empty hierarchy when UIAutomator returns no nodes', async () => {
+    const calls: Array<{ args: string[] }> = [];
+    const runner = {
+      run: vi.fn(async (options: { args: string[] }) => {
+        calls.push(options);
         const joined = options.args.join(' ');
         if (joined.includes('get-state')) return { code: 0, stdout: 'device\n', stderr: '' };
         if (joined.includes('exec-out uiautomator dump /dev/tty')) return { code: 0, stdout: 'UI hierchary dumped to: /dev/tty\n', stderr: '' };
@@ -228,7 +263,13 @@ describe('native driver boundaries', () => {
     const driver = new AndroidAdbScrcpyDriver('device-01', { serial: 'serial-01', runner });
 
     await driver.connect();
-    await expect(driver.getUiHierarchy()).rejects.toThrow('UI hierarchy dump returned no nodes for device-01 (serial-01)');
+    const first = await driver.getUiHierarchy();
+    const second = await driver.getUiHierarchy();
+    const dumpCalls = calls.filter(call => call.args.includes('uiautomator'));
+
+    expect(first.nodes).toEqual([]);
+    expect(second.nodes).toEqual([]);
+    expect(dumpCalls).toHaveLength(2);
   });
 
   it('does not allow Android actions before connect', async () => {
@@ -560,12 +601,12 @@ async function waitFor(condition: () => boolean, timeoutMs = 250): Promise<void>
 }
 
 describe('control plane lifecycle', () => {
-  const makePlane = (count = 12, autoExecute = false, driverLatency = 0) => {
+  const makePlane = (count = 12, autoExecute = false, driverLatency = 0, plannerProvider?: AgentPlannerProvider) => {
     const devices = new DeviceManager(count);
     const scheduler = new TaskScheduler({ maxConcurrentAI: 8, maxConcurrentVLM: 4, maxConcurrentADB: 12, maxConcurrentIOS: 4, timeoutMs: 500, maxRetries: 2, rateLimitPerMinute: 60 });
     const drivers = new DriverRegistry();
     devices.getAll().forEach(device => drivers.register(new SimulatedDeviceDriver(device, driverLatency)));
-    return { devices, scheduler, drivers, plane: new ControlPlane(devices, scheduler, drivers, { autoExecute }) };
+    return { devices, scheduler, drivers, plane: new ControlPlane(devices, scheduler, drivers, { autoExecute, plannerProvider }) };
   };
 
   it('executes a task, records it, and releases resources', async () => {
@@ -581,6 +622,76 @@ describe('control plane lifecycle', () => {
     expect(session.actionHistory.map(event => event.message).join('\n')).toContain('Captured post-action verification screenshot');
     expect(plane.scheduler.workers.snapshot().active).toBeLessThanOrEqual(8);
     expect(plane.scheduler.resources.snapshot()).toEqual({ AI: 0, VLM: 0, ADB: 0, IOS: 0 });
+  });
+
+  it('archives selected-device step trace metadata without screenshot binaries', async () => {
+    const { devices, plane } = makePlane(1, true);
+    plane.stopDevice('device-01');
+    const [task] = plane.submitBatch('Check the dashboard', ['device-01']);
+
+    await waitFor(() => task.status === 'SUCCESS', 600);
+    const state = plane.getAgentState('device-01');
+    const trace = state.recentStepRecords;
+
+    expect(trace.length).toBeGreaterThanOrEqual(2);
+    expect(trace.map(record => record.deviceId)).toEqual(trace.map(() => 'device-01'));
+    expect(trace.some(record => record.status === 'VERIFIED')).toBe(true);
+    expect(trace.some(record => record.status === 'FINISHED')).toBe(true);
+    expect(trace[0].observation.screenshot).toMatchObject({ source: 'ON_DEMAND_SCREENSHOT', purpose: 'AI_OBSERVATION', width: 1440, height: 2560 });
+    expect(JSON.stringify(state)).not.toContain('data');
+  });
+
+  it('records task artifacts separately from step trace and keeps them device-local', async () => {
+    const { plane } = makePlane(2, true);
+    plane.stopDevice('device-01');
+    plane.stopDevice('device-02');
+    const [first, second] = plane.submitBatch('Check the dashboard', ['device-01', 'device-02']);
+
+    await waitFor(() => first.status === 'SUCCESS' && second.status === 'SUCCESS', 600);
+    const artifacts = plane.getTaskArtifacts('device-01', first.id);
+    const artifactTypes = new Set(artifacts.map(artifact => artifact.type));
+    const summary = plane.getTaskArtifactSummary('device-01', first.id);
+
+    expect(artifactTypes).toEqual(new Set(['AI_OBSERVATION_SCREENSHOT', 'POST_ACTION_SCREENSHOT', 'UI_HIERARCHY_SUMMARY', 'PLANNER_REQUEST', 'PLANNER_RESPONSE']));
+    expect(artifacts.every(artifact => artifact.deviceId === 'device-01' && artifact.taskInstanceId === first.id)).toBe(true);
+    expect(artifacts.every(artifact => artifact.hasBinary === false)).toBe(true);
+    expect(summary.total).toBe(artifacts.length);
+    expect(plane.artifactStore.listTaskArtifacts('device-02', first.id)).toHaveLength(0);
+    expect(() => plane.getTaskArtifacts('device-02', first.id)).toThrow(`Task ${first.id} belongs to device-01, not device-02`);
+  });
+
+  it('lists global task summaries without duplicating current, queued, or history tasks', async () => {
+    const { devices, plane } = makePlane(2, false);
+    plane.stopDevice('device-01');
+    const [first, queued, sibling] = plane.submitBatch('Task center index', ['device-01', 'device-01', 'device-02']);
+    await plane.completeTask(first.id);
+
+    const result = plane.listTasks({ limit: 20 });
+    const ids = result.tasks.map(task => task.taskId);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(expect.arrayContaining([first.id, queued.id, sibling.id]));
+    expect(result.tasks.find(task => task.taskId === queued.id)).toMatchObject({ deviceId: 'device-01', deviceName: devices.get('device-01')?.name });
+    expect(JSON.stringify(result.tasks)).not.toContain('stepTrace');
+    expect(JSON.stringify(result.tasks)).not.toContain('redactedPayload');
+    expect(JSON.stringify(result.tasks)).not.toContain('uiTree');
+  });
+
+  it('returns selected task audit without leaking sibling task artifacts', async () => {
+    const { plane } = makePlane(2, true);
+    plane.stopDevice('device-01');
+    plane.stopDevice('device-02');
+    const [first, second] = plane.submitBatch('Check task audit isolation', ['device-01', 'device-02']);
+
+    await waitFor(() => first.status === 'SUCCESS' && second.status === 'SUCCESS', 600);
+    const audit = plane.getTaskAudit('device-01', first.id, 3);
+
+    expect(audit.task.taskId).toBe(first.id);
+    expect(audit.device.id).toBe('device-01');
+    expect(audit.trace.every(record => record.deviceId === 'device-01' && record.taskInstanceId === first.id)).toBe(true);
+    expect(audit.artifacts.every(artifact => artifact.deviceId === 'device-01' && artifact.taskInstanceId === first.id)).toBe(true);
+    expect(JSON.stringify(audit.artifacts)).not.toMatch(/"data"\s*:/u);
+    expect(() => plane.getTaskAudit('device-02', first.id)).toThrow(`Task ${first.id} belongs to device-01, not device-02`);
   });
 
   it('keeps an auto task complete when UI hierarchy verification fails but screenshot verification succeeds', async () => {
@@ -600,6 +711,234 @@ describe('control plane lifecycle', () => {
     expect(messages).toContain('taskAction=goal_step verification=UI_HIERARCHY_AFTER_ACTION');
     expect(messages).toContain('result=ERROR');
     expect(messages).toContain('Captured post-action verification screenshot');
+  });
+
+  it('accumulates planner usage and re-observes on each multi-step planner call', async () => {
+    const observedSteps: number[] = [];
+    const plannerProvider: AgentPlannerProvider = {
+      id: 'usage-provider',
+      async plan(observation) {
+        observedSteps.push(observation.currentStep);
+        const action = observation.currentStep === 0
+          ? {
+              actionId: `wait-${observation.currentStep}`,
+              deviceId: observation.deviceId,
+              taskInstanceId: observation.taskInstanceId,
+              source: 'MOCK_PLANNER' as const,
+              type: 'wait' as const,
+              durationMs: 0,
+              reason: 'first step waits to force another observation',
+            }
+          : {
+              actionId: `finish-${observation.currentStep}`,
+              deviceId: observation.deviceId,
+              taskInstanceId: observation.taskInstanceId,
+              source: 'MOCK_PLANNER' as const,
+              type: 'finish' as const,
+              reason: 'second step finishes after re-observation',
+            };
+        return { action, usage: { promptTokens: 6, completionTokens: 4, totalTokens: 10, estimatedCostUsd: 0.002 } };
+      },
+    };
+    const { plane } = makePlane(1, true, 0, plannerProvider);
+    plane.stopDevice('device-01');
+    const [task] = plane.submitBatch('multi-step usage accounting', ['device-01']);
+
+    await waitFor(() => task.status === 'SUCCESS', 600);
+    const summary = plane.listTasks({ deviceId: 'device-01' }).tasks.find(item => item.taskId === task.id)!;
+
+    expect(observedSteps).toEqual([0, 1]);
+    expect(task.completedSteps).toBe(1);
+    expect(summary.totalTokens).toBe(20);
+    expect(summary.estimatedCostUsd).toBeCloseTo(0.004);
+    expect(summary.plannerLatencyMs).toBeGreaterThanOrEqual(0);
+    expect(plane.getTaskAudit('device-01', task.id).trace.some(record => record.telemetry?.usage?.totalTokens === 10)).toBe(true);
+  });
+
+  it('executes selector-driven tap_element goals from Android UIAutomator text', async () => {
+    const { drivers, plane } = makePlane(1, true);
+    const driver = drivers.get('device-01') as SimulatedDeviceDriver & {
+      getUiHierarchy: () => Promise<UiHierarchy>;
+      getScreenSize: () => Promise<{ width: number; height: number }>;
+      tap: (point: { x: number; y: number }, signal?: AbortSignal) => Promise<void>;
+    };
+    driver.getUiHierarchy = vi.fn(async () => parseUiAutomatorXml(`
+<hierarchy rotation="0">
+  <node index="0" text="Open" resource-id="com.example:id/open" class="android.widget.Button" package="com.example" content-desc="" clickable="true" enabled="true" focused="false" bounds="[100,200][300,400]" />
+</hierarchy>`));
+    driver.getScreenSize = vi.fn(async () => ({ width: 1000, height: 2000 }));
+    const tap = vi.fn(async (_point: { x: number; y: number }, _signal?: AbortSignal) => undefined);
+    driver.tap = tap;
+
+    plane.stopDevice('device-01');
+    const [task] = plane.submitBatch('tap text:Open', ['device-01']);
+
+    await waitFor(() => task.status === 'SUCCESS');
+    expect(tap).toHaveBeenCalledWith({ x: 200 / 999, y: 300 / 1999 }, expect.any(AbortSignal));
+  });
+
+  it('fails selector-driven tap_element without fallback coordinates when no element matches', async () => {
+    const { drivers, plane } = makePlane(1, true);
+    const driver = drivers.get('device-01') as SimulatedDeviceDriver & {
+      getUiHierarchy: () => Promise<UiHierarchy>;
+      tap: (point: { x: number; y: number }, signal?: AbortSignal) => Promise<void>;
+    };
+    driver.getUiHierarchy = vi.fn(async () => parseUiAutomatorXml('<hierarchy rotation="0"/>'));
+    const tap = vi.fn(async (_point: { x: number; y: number }, _signal?: AbortSignal) => undefined);
+    driver.tap = tap;
+
+    plane.stopDevice('device-01');
+    const [task] = plane.submitBatch('tap text:Missing', ['device-01']);
+
+    await waitFor(() => task.status === 'FAILED');
+    expect(tap).not.toHaveBeenCalled();
+    expect(task.error).toContain('No UI element matched selector');
+  });
+
+  it('redacts deterministic input_text goal content from agent task history', async () => {
+    const { devices, plane } = makePlane(1, true);
+    plane.stopDevice('device-01');
+    const [task] = plane.submitBatch('input text:secret password', ['device-01']);
+
+    await waitFor(() => task.status === 'SUCCESS');
+    const history = devices.get('device-01')?.actionHistory.map(event => event.message).join('\n') ?? '';
+    expect(history).toContain('agentAction=input_text');
+    expect(history).toContain('redactedLength=15');
+    expect(history).not.toContain('secret password');
+  });
+
+  it('puts sensitive goals into human approval without executing the action', async () => {
+    const { devices, drivers, plane } = makePlane(1, true);
+    const driver = drivers.get('device-01') as SimulatedDeviceDriver & { tap: (point: { x: number; y: number }) => Promise<void> };
+    const tap = vi.fn(async (_point: { x: number; y: number }) => undefined);
+    driver.tap = tap;
+
+    plane.stopDevice('device-01');
+    const [task] = plane.submitBatch('点赞 tap text:Like', ['device-01']);
+
+    await waitFor(() => task.status === 'WAITING_APPROVAL');
+    expect(tap).not.toHaveBeenCalled();
+    expect(devices.get('device-01')?.taskContext.variables.pendingApproval).toMatchObject({ type: 'request_human' });
+    expect(plane.getAgentState('device-01').currentStepRecord).toMatchObject({ status: 'WAITING_APPROVAL', approval: { required: true } });
+    expect(plane.scheduler.workers.isActive(task.id)).toBe(false);
+  });
+
+  it('approves and rejects only the targeted device task', async () => {
+    const { devices, plane } = makePlane(2, true);
+    plane.stopDevice('device-01');
+    plane.stopDevice('device-02');
+    const [first, second] = plane.submitBatch('点赞一下', ['device-01', 'device-02']);
+
+    await waitFor(() => first.status === 'WAITING_APPROVAL' && second.status === 'WAITING_APPROVAL');
+    plane.approveTask('device-01', first.id);
+    await waitFor(() => first.status === 'SUCCESS');
+    expect(second.status).toBe('WAITING_APPROVAL');
+    expect(plane.getAgentState('device-01').recentStepRecords.some(record => record.approval?.decision === 'APPROVED')).toBe(true);
+    expect(plane.getTaskArtifacts('device-01', first.id).some(artifact => artifact.type === 'APPROVAL_DECISION' && artifact.metadata.decision === 'APPROVED')).toBe(true);
+
+    await plane.rejectTask('device-02', second.id);
+    expect(second.status).toBe('FAILED');
+    expect(plane.getAgentState('device-02').recentStepRecords.some(record => record.approval?.decision === 'REJECTED')).toBe(true);
+    expect(plane.getTaskArtifacts('device-02', second.id).some(artifact => artifact.type === 'APPROVAL_DECISION' && artifact.metadata.decision === 'REJECTED')).toBe(true);
+    expect(devices.get('device-01')?.taskHistory.at(-1)?.id).toBe(first.id);
+    expect(devices.get('device-02')?.taskHistory.at(-1)?.id).toBe(second.id);
+  });
+
+  it('rejects non-whitelisted planner actions without affecting sibling tasks', async () => {
+    const plannerProvider: AgentPlannerProvider = {
+      id: 'test-invalid-provider',
+      async plan(observation) {
+        if (observation.deviceId === 'device-01') {
+          return {
+            actionId: `invalid-${observation.deviceId}`,
+            deviceId: observation.deviceId,
+            taskInstanceId: observation.taskInstanceId,
+            source: 'MOCK_PLANNER',
+            type: 'shell',
+            reason: 'invalid planner output',
+            command: 'adb shell input tap 1 1',
+          } as never;
+        }
+        return {
+          actionId: `finish-${observation.deviceId}`,
+          deviceId: observation.deviceId,
+          taskInstanceId: observation.taskInstanceId,
+          source: 'MOCK_PLANNER',
+          type: 'finish',
+          reason: 'sibling task can finish independently',
+        };
+      },
+    };
+    const { plane } = makePlane(2, true, 0, plannerProvider);
+    plane.stopDevice('device-01');
+    plane.stopDevice('device-02');
+    const [failed, succeeded] = plane.submitBatch('custom provider isolation', ['device-01', 'device-02']);
+
+    await waitFor(() => failed.status === 'FAILED' && succeeded.status === 'SUCCESS', 600);
+
+    expect(failed.error).toContain('Invalid discriminator value');
+    expect(succeeded.status).toBe('SUCCESS');
+    expect(plane.getAgentState('device-01').recentStepRecords.at(-1)?.status).toBe('FAILED');
+    expect(plane.getAgentState('device-02').recentStepRecords.at(-1)?.status).toBe('FINISHED');
+  });
+
+  it('marks only the interrupted device step trace as DEVICE_OFFLINE', async () => {
+    const { devices, plane } = makePlane(2, true, 60);
+    plane.stopDevice('device-01');
+    plane.stopDevice('device-02');
+    const [first, second] = plane.submitBatch('Check offline interruption', ['device-01', 'device-02']);
+
+    await waitFor(() => (devices.get('device-01')?.taskContext.stepTrace?.length ?? 0) > 0, 400);
+    await plane.setOffline('device-01');
+
+    expect(first.status).toBe('DEVICE_OFFLINE');
+    await waitFor(() => second.status === 'SUCCESS', 900);
+    expect(plane.getAgentState('device-01').recentStepRecords.at(-1)?.status).toBe('DEVICE_OFFLINE');
+    expect(devices.get('device-02')?.status).toBe('ONLINE');
+  });
+
+  it('records a max-step failure when a planner never finishes', async () => {
+    const plannerProvider: AgentPlannerProvider = {
+      id: 'test-wait-forever-provider',
+      async plan(observation) {
+        return {
+          actionId: `wait-${observation.currentStep}`,
+          deviceId: observation.deviceId,
+          taskInstanceId: observation.taskInstanceId,
+          source: 'MOCK_PLANNER',
+          type: 'wait',
+          durationMs: 0,
+          reason: 'exercise max-step guard',
+        };
+      },
+    };
+    const { plane } = makePlane(1, true, 0, plannerProvider);
+    plane.stopDevice('device-01');
+    const [task] = plane.submitBatch('never finish', ['device-01']);
+
+    await waitFor(() => task.status === 'FAILED', 1_000);
+
+    expect(task.error).toContain('Max agent steps reached');
+    expect(plane.getAgentState('device-01').recentStepRecords.at(-1)).toMatchObject({ status: 'FAILED', verification: { result: 'ERROR' } });
+  });
+
+  it('keeps batch task failure isolated from a sibling selector-driven success', async () => {
+    const { drivers, plane } = makePlane(2, true);
+    const missingDriver = drivers.get('device-01') as SimulatedDeviceDriver & { getUiHierarchy: () => Promise<UiHierarchy> };
+    const matchingDriver = drivers.get('device-02') as SimulatedDeviceDriver & { getUiHierarchy: () => Promise<UiHierarchy> };
+    missingDriver.getUiHierarchy = vi.fn(async () => parseUiAutomatorXml('<hierarchy rotation="0"/>'));
+    matchingDriver.getUiHierarchy = vi.fn(async () => parseUiAutomatorXml(`
+<hierarchy rotation="0">
+  <node index="0" text="Open" resource-id="com.example:id/open" class="android.widget.Button" package="com.example" content-desc="" clickable="true" enabled="true" focused="false" bounds="[10,10][110,110]" />
+</hierarchy>`));
+
+    plane.stopDevice('device-01');
+    plane.stopDevice('device-02');
+    const [failed, succeeded] = plane.submitBatch('tap text:Open', ['device-01', 'device-02']);
+
+    await waitFor(() => failed.status === 'FAILED' && succeeded.status === 'SUCCESS');
+    expect(failed.deviceId).toBe('device-01');
+    expect(succeeded.deviceId).toBe('device-02');
   });
 
   it('pauses and resumes a device-scoped task without affecting a sibling', () => {
@@ -627,7 +966,7 @@ describe('control plane lifecycle', () => {
   it('keeps an auto-executing task resumable across disconnect and recovery', async () => {
     const { devices, plane } = makePlane(1, true, 20);
     plane.stopDevice('device-01');
-    const [task] = plane.submitBatch('Recover the dashboard task', ['device-01']);
+    const [task] = plane.submitBatch('verify recover dashboard task', ['device-01']);
     const originalTask = devices.get('device-01')?.currentTask;
     await plane.setOffline('device-01');
     expect(devices.get('device-01')?.currentTask).toBe(originalTask);
@@ -636,7 +975,7 @@ describe('control plane lifecycle', () => {
     expect(task.status).toBe('DEVICE_OFFLINE');
     await plane.recover('device-01');
     plane.resumeDevice('device-01');
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await waitFor(() => task.status === 'SUCCESS', 500);
     expect(task.status).toBe('SUCCESS');
     expect(devices.get('device-01')?.currentTask).toBeNull();
   });
@@ -644,10 +983,10 @@ describe('control plane lifecycle', () => {
   it('does not start a second execution when pause and resume race cancellation', async () => {
     const { devices, plane } = makePlane(1, true, 20);
     plane.stopDevice('device-01');
-    const [task] = plane.submitBatch('Pause and resume safely', ['device-01']);
+    const [task] = plane.submitBatch('verify pause and resume safely', ['device-01']);
     plane.pauseDevice('device-01');
     plane.resumeDevice('device-01');
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await waitFor(() => task.status === 'SUCCESS', 500);
     expect(task.status).toBe('SUCCESS');
     expect(devices.get('device-01')?.taskHistory.filter(item => item.id === task.id)).toHaveLength(1);
   });

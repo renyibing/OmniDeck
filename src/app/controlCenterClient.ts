@@ -1,4 +1,5 @@
-import { eventEnvelopeSchema, type DeviceConfigurationDTO, type DeviceDetailDTO, type DeviceSummaryDTO, type DiscoveredDeviceDTO, type EventEnvelope, type RuntimeSnapshot, type StreamPolicyCommand, type BatchTaskCommand, type IOSWdaStatusDTO, type UiHierarchyDTO } from '../server/protocol';
+import { eventEnvelopeSchema, type AgentArtifactDTO, type AgentArtifactSummaryDTO, type AgentStateDTO, type AgentTaskTraceDTO, type DeviceConfigurationDTO, type DeviceDetailDTO, type DeviceSummaryDTO, type DiscoveredDeviceDTO, type EventEnvelope, type RuntimeSnapshot, type StreamPolicyCommand, type BatchTaskCommand, type IOSWdaStatusDTO, type TaskAuditDTO, type TaskSummaryDTO, type UiHierarchyDTO } from '../server/protocol';
+import type { TaskStatus } from '../domain/types';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 export type DeviceAction = 'pause' | 'resume' | 'stop' | 'retry' | 'take-control' | 'release-control' | 'disconnect' | 'clear-configuration' | 'recover' | 'restart-app' | 'launch-app' | 'stop-app';
@@ -14,6 +15,9 @@ export type DevicePressKey =
   | 'ArrowRight';
 export interface ScreenTapPoint { x: number; y: number; }
 export interface SwipeCommandInput { from: ScreenTapPoint; to: ScreenTapPoint; durationMs?: number; }
+export interface TaskArtifactsResponse { artifacts: AgentArtifactDTO[]; summary: AgentArtifactSummaryDTO; }
+export interface TaskListResponse { tasks: TaskSummaryDTO[]; total: number; limit: number; offset: number; }
+export interface TaskListFilter { status?: TaskStatus | 'ALL'; deviceId?: string; batchId?: string; limit?: number; offset?: number; }
 
 type RuntimeResponse = RuntimeSnapshot;
 type EventHandler = (event: EventEnvelope) => void;
@@ -51,6 +55,37 @@ export class ControlCenterClient {
     return result.uiTree;
   }
 
+  async getAgentState(deviceId: string, signal?: AbortSignal): Promise<AgentStateDTO> {
+    const result = await this.request<{ agentState: AgentStateDTO }>(`/devices/${encodeURIComponent(deviceId)}/agent-state`, { signal });
+    return result.agentState;
+  }
+
+  async getTaskTrace(deviceId: string, taskId: string, signal?: AbortSignal): Promise<AgentTaskTraceDTO[]> {
+    const result = await this.request<{ trace: AgentTaskTraceDTO[] }>(`/devices/${encodeURIComponent(deviceId)}/tasks/${encodeURIComponent(taskId)}/trace`, { signal });
+    return result.trace;
+  }
+
+  async getTaskArtifacts(deviceId: string, taskId: string, signal?: AbortSignal): Promise<TaskArtifactsResponse> {
+    const result = await this.request<TaskArtifactsResponse>(`/devices/${encodeURIComponent(deviceId)}/tasks/${encodeURIComponent(taskId)}/artifacts`, { signal });
+    return result;
+  }
+
+  async getTasks(filter: TaskListFilter = {}, signal?: AbortSignal): Promise<TaskListResponse> {
+    const params = new URLSearchParams();
+    if (filter.status && filter.status !== 'ALL') params.set('status', filter.status);
+    if (filter.deviceId) params.set('deviceId', filter.deviceId);
+    if (filter.batchId) params.set('batchId', filter.batchId);
+    if (filter.limit) params.set('limit', String(filter.limit));
+    if (filter.offset) params.set('offset', String(filter.offset));
+    const query = params.toString();
+    return this.request<TaskListResponse>(`/tasks${query ? `?${query}` : ''}`, { signal });
+  }
+
+  async getTaskAudit(taskId: string, signal?: AbortSignal): Promise<TaskAuditDTO> {
+    const result = await this.request<{ audit: TaskAuditDTO }>(`/tasks/${encodeURIComponent(taskId)}/audit`, { signal });
+    return result.audit;
+  }
+
   async discoverDevices(signal?: AbortSignal): Promise<DiscoveredDeviceDTO[]> {
     const result = await this.request<{ devices: DiscoveredDeviceDTO[] }>('/devices/discovery', { signal });
     return result.devices;
@@ -74,6 +109,22 @@ export class ControlCenterClient {
 
   async submitBatch(command: BatchTaskCommand): Promise<void> {
     await this.request('/tasks/batch', { method: 'POST', body: command });
+  }
+
+  async approveTask(deviceId: string, taskId: string, commandId = crypto.randomUUID()): Promise<AgentStateDTO> {
+    const result = await this.request<{ agentState: AgentStateDTO }>(`/devices/${encodeURIComponent(deviceId)}/tasks/${encodeURIComponent(taskId)}/approve`, {
+      method: 'POST',
+      body: { commandId, deviceId, taskId, timestamp: Date.now() },
+    });
+    return result.agentState;
+  }
+
+  async rejectTask(deviceId: string, taskId: string, commandId = crypto.randomUUID()): Promise<AgentStateDTO> {
+    const result = await this.request<{ agentState: AgentStateDTO }>(`/devices/${encodeURIComponent(deviceId)}/tasks/${encodeURIComponent(taskId)}/reject`, {
+      method: 'POST',
+      body: { commandId, deviceId, taskId, timestamp: Date.now() },
+    });
+    return result.agentState;
   }
 
   async deviceAction(deviceId: string, action: DeviceAction, commandId = crypto.randomUUID(), appId?: string, signal?: AbortSignal): Promise<DeviceSummaryDTO> {

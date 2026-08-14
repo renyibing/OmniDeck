@@ -10,6 +10,7 @@ import { IOSXCUITestDriver } from '../domain/iosXcuitestDriver';
 import { IOSWdaDiagnostics } from '../domain/iosWdaDiagnostics';
 import { describeDriverError } from '../domain/controlPlane';
 import { deriveWdaMjpegUrl } from '../domain/wdaMjpegUrl';
+import type { AgentPlannerProvider } from '../domain/agentPlannerProvider';
 import type { DeviceSession, DriverMode, StreamProfile, TaskInstance, TaskStatus } from '../domain/types';
 import { EventStore } from './eventStore';
 import { RuntimeStateStore, type PersistedRuntimeState } from './runtimeStateStore';
@@ -28,6 +29,7 @@ import {
   screenTapCommandSchema,
   streamPolicyCommandSchema,
   swipeCommandSchema,
+  taskApprovalCommandSchema,
   toDeviceDetail,
   toDeviceSummary,
   toRuntimeSnapshot,
@@ -36,8 +38,14 @@ import {
   type DeviceSummaryDTO,
   type EventEnvelope,
   type EventType,
+  type AgentStateDTO,
+  type AgentArtifactDTO,
+  type AgentArtifactSummaryDTO,
+  type AgentTaskTraceDTO,
   type IOSWdaStatusDTO,
   type RuntimeSnapshot,
+  type TaskAuditDTO,
+  type TaskSummaryDTO,
 } from './protocol';
 
 const concurrency = {
@@ -85,6 +93,7 @@ export interface ControlDaemonOptions {
   iosDevices?: IOSBinding[];
   hostDiscovery?: boolean;
   stateFilePath?: string;
+  plannerProvider?: AgentPlannerProvider;
 }
 
 export class ControlDaemon {
@@ -179,7 +188,7 @@ export class ControlDaemon {
       }
     });
     this.groups = this.makeGroups(this.devices.getAll());
-    this.controlPlane = new ControlPlane(this.devices, this.scheduler, this.drivers, { autoExecute: options.autoExecute ?? true });
+    this.controlPlane = new ControlPlane(this.devices, this.scheduler, this.drivers, { autoExecute: options.autoExecute ?? true, plannerProvider: options.plannerProvider });
     this.restorePersistedConfigurations();
     this.captureBaseline();
     this.controlPlane.subscribe(() => this.publishChanges());
@@ -191,9 +200,28 @@ export class ControlDaemon {
     if (this.healthTimer && 'unref' in this.healthTimer) this.healthTimer.unref();
   }
 
+  private toSummary(session: DeviceSession): DeviceSummaryDTO {
+    return toDeviceSummary(session, { androidVideoReady: this.isAndroidVideoReady(session) });
+  }
+
+  private toDetail(session: DeviceSession): DeviceDetailDTO {
+    return toDeviceDetail(session, { androidVideoReady: this.isAndroidVideoReady(session) });
+  }
+
+  private isAndroidVideoReady(session: DeviceSession): boolean {
+    return session.configuration?.driverMode === 'ANDROID_ADB_SCRCPY'
+      && session.connection.state === 'CONNECTED'
+      && this.scrcpyVideos.isStarted(session.id);
+  }
+
+  private canAttachAndroidVideo(deviceId: string): boolean {
+    const session = this.devices.get(deviceId);
+    return session ? this.isAndroidVideoReady(session) : false;
+  }
+
   snapshot(): RuntimeSnapshot {
     return toRuntimeSnapshot({
-      devices: this.devices.getAll().map(toDeviceSummary),
+      devices: this.devices.getAll().map(device => this.toSummary(device)),
       workers: this.scheduler.workers.snapshot(),
       resources: this.scheduler.resources.snapshot(),
       config: this.scheduler.config,
@@ -206,12 +234,36 @@ export class ControlDaemon {
 
   deviceSummary(deviceId: string): DeviceSummaryDTO | undefined {
     const device = this.devices.get(deviceId);
-    return device ? toDeviceSummary(device) : undefined;
+    return device ? this.toSummary(device) : undefined;
   }
 
   deviceDetail(deviceId: string): DeviceDetailDTO | undefined {
     const device = this.devices.get(deviceId);
-    return device ? toDeviceDetail(device) : undefined;
+    return device ? this.toDetail(device) : undefined;
+  }
+
+  agentState(deviceId: string): AgentStateDTO | undefined {
+    if (!this.devices.get(deviceId)) return undefined;
+    return cloneSnapshot(this.controlPlane.getAgentState(deviceId));
+  }
+
+  taskTrace(deviceId: string, taskId: string, limit = 50): AgentTaskTraceDTO[] {
+    return cloneSnapshot(this.controlPlane.getTaskTrace(deviceId, taskId, limit));
+  }
+
+  taskArtifacts(deviceId: string, taskId: string, limit = 50): { artifacts: AgentArtifactDTO[]; summary: AgentArtifactSummaryDTO } {
+    return cloneSnapshot({
+      artifacts: this.controlPlane.getTaskArtifacts(deviceId, taskId, limit),
+      summary: this.controlPlane.getTaskArtifactSummary(deviceId, taskId),
+    });
+  }
+
+  taskList(filter: { status?: TaskStatus | 'ALL'; deviceId?: string; batchId?: string; offset?: number; limit?: number } = {}): { tasks: TaskSummaryDTO[]; total: number; offset: number; limit: number } {
+    return cloneSnapshot(this.controlPlane.listTasks(filter));
+  }
+
+  taskAudit(deviceId: string, taskId: string, limit = 50): TaskAuditDTO {
+    return cloneSnapshot(this.controlPlane.getTaskAudit(deviceId, taskId, limit));
   }
 
   async listen(options: ControlDaemonOptions = {}): Promise<Server> {
@@ -219,6 +271,7 @@ export class ControlDaemon {
     this.server = createServer((request, response) => { void this.handle(request, response); });
     this.videoSockets = new WebSocketServer({ noServer: true });
     this.server.on('upgrade', (request, socket, head) => {
+      socket.on('error', () => undefined);
       const host = request.headers.host ?? 'localhost';
       const url = new URL(request.url ?? '/', `http://${host}`);
       const match = url.pathname.match(/^\/api\/devices\/([^/]+)\/video$/);
@@ -226,8 +279,20 @@ export class ControlDaemon {
         socket.destroy();
         return;
       }
+      let deviceId: string;
+      try {
+        deviceId = this.decodeId(match[1]!);
+      } catch {
+        socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 17\r\n\r\nInvalid device ID');
+        socket.destroy();
+        return;
+      }
+      if (!this.canAttachAndroidVideo(deviceId)) {
+        socket.write('HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Length: 30\r\n\r\nAndroid video is not available');
+        socket.destroy();
+        return;
+      }
       this.videoSockets!.handleUpgrade(request, socket, head, ws => {
-        const deviceId = this.decodeId(match[1]!);
         void this.attachVideoClient(deviceId, ws);
       });
     });
@@ -280,7 +345,7 @@ export class ControlDaemon {
       case 'recover':
         await this.controlPlane.recover(deviceId);
         if (this.devices.get(deviceId)?.configuration?.driverMode === 'ANDROID_ADB_SCRCPY') {
-          await this.startAndroidVideo(deviceId);
+          await this.startAndroidVideoOrPreviewFallback(deviceId);
         } else {
           this.startPreview(deviceId);
         }
@@ -360,7 +425,7 @@ export class ControlDaemon {
     this.devices.clearConfiguration(deviceId);
     this.events.append('DEVICE_CONFIGURED', {
       deviceId,
-      payload: { snapshot: toDeviceSummary(this.devices.get(deviceId)!), cleared: true },
+      payload: { snapshot: this.toSummary(this.devices.get(deviceId)!), cleared: true },
     });
     this.persistRuntimeState();
     this.publishChanges();
@@ -389,7 +454,7 @@ export class ControlDaemon {
     }
     const updated = this.devices.configure(configuration.deviceId, { ...configuration, configuredAt: Date.now() });
     if (!updated) throw new HttpError(404, 'Device not found');
-    const summary = toDeviceSummary(updated);
+    const summary = this.toSummary(updated);
     this.persistRuntimeState();
     this.events.append('DEVICE_CONFIGURED', { deviceId: updated.id, payload: { snapshot: summary } });
     this.publishChanges();
@@ -420,15 +485,15 @@ export class ControlDaemon {
       const connected = this.devices.get(deviceId)!;
       await this.drivers.applyStreamProfile(deviceId, connected.stream);
       if (session.configuration.driverMode === 'ANDROID_ADB_SCRCPY') {
-        await this.startAndroidVideo(deviceId);
+        await this.startAndroidVideoOrPreviewFallback(deviceId);
       } else {
         this.startPreview(deviceId);
       }
-      this.events.append('DEVICE_CONNECTED', { deviceId, payload: { snapshot: toDeviceSummary(connected) } });
+      this.events.append('DEVICE_CONNECTED', { deviceId, payload: { snapshot: this.toSummary(connected) } });
       this.desiredConnections.add(deviceId);
       this.persistRuntimeState();
       this.publishChanges();
-      return toDeviceSummary(connected);
+      return this.toSummary(connected);
     } catch (error) {
       this.previews.stop(deviceId);
       await this.scrcpyVideos.stop(deviceId);
@@ -463,10 +528,7 @@ export class ControlDaemon {
     this.devices.getAll().forEach(device => {
       if (!device.configuration || device.configuration.driverMode === 'SIMULATED' || device.connection.state !== 'CONNECTED') return;
       this.previews.setFps(device.id, this.previewCaptureFps(device));
-      void this.syncAndroidVideo(device.id).catch(error => {
-        const message = error instanceof Error ? error.message : 'Video stream update failed';
-        this.events.append('DEVICE_CONNECTION_FAILED', { deviceId: device.id, payload: { error: message } });
-      });
+      void this.syncAndroidVideoOrPreviewFallback(device.id);
       void this.drivers.applyStreamProfile(device.id, device.stream).catch(error => {
         const message = error instanceof Error ? error.message : 'Stream profile update failed';
         this.previews.stop(device.id);
@@ -515,11 +577,32 @@ export class ControlDaemon {
     await this.scrcpyVideos.ensure(deviceId, session.configuration.identifier, this.androidVideoProfile(session));
   }
 
+  private async startAndroidVideoOrPreviewFallback(deviceId: string): Promise<void> {
+    try {
+      await this.startAndroidVideo(deviceId);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Android H.264 preview unavailable';
+      this.events.append('DEVICE_CONNECTION_FAILED', { deviceId, payload: { error: message, degradedPreview: true, fallback: 'ADB_FRAME_PREVIEW' } });
+      this.ensurePreviewFallback(deviceId);
+    }
+  }
+
   private async syncAndroidVideo(deviceId: string): Promise<void> {
     const session = this.devices.get(deviceId);
     if (!session?.configuration || session.configuration.driverMode !== 'ANDROID_ADB_SCRCPY') return;
     if (session.connection.state !== 'CONNECTED') return;
     await this.scrcpyVideos.applyProfile(deviceId, session.configuration.identifier, this.androidVideoProfile(session));
+  }
+
+  private async syncAndroidVideoOrPreviewFallback(deviceId: string): Promise<void> {
+    try {
+      await this.syncAndroidVideo(deviceId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Android H.264 preview update unavailable';
+      this.events.append('DEVICE_CONNECTION_FAILED', { deviceId, payload: { error: message, degradedPreview: true, fallback: 'ADB_FRAME_PREVIEW' } });
+      this.ensurePreviewFallback(deviceId);
+    }
   }
 
   private attachVideoClient(deviceId: string, socket: import('ws').WebSocket): void {
@@ -576,7 +659,7 @@ export class ControlDaemon {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
     try {
       if (request.method === 'GET' && url.pathname === '/api/devices') {
-        return this.json(response, { version: protocolVersion, devices: this.devices.getAll().map(toDeviceSummary) });
+        return this.json(response, { version: protocolVersion, devices: this.devices.getAll().map(device => this.toSummary(device)) });
       }
       if (request.method === 'GET' && url.pathname === '/api/devices/discovery') {
         return this.json(response, { version: protocolVersion, devices: await this.discoverDevicesAsync() });
@@ -586,6 +669,25 @@ export class ControlDaemon {
         const headerSequence = Number(request.headers['last-event-id'] ?? 0);
         const querySequence = Number(url.searchParams.get('since') ?? 0);
         return this.sse(request, response, Number.isFinite(querySequence) ? Math.max(headerSequence, querySequence) : headerSequence);
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/tasks') {
+        const status = parseTaskStatusFilter(url.searchParams.get('status'));
+        const deviceId = url.searchParams.get('deviceId') ?? undefined;
+        const batchId = url.searchParams.get('batchId') ?? undefined;
+        const limit = parseListLimit(url.searchParams.get('limit'));
+        const offset = parseOffset(url.searchParams.get('offset'));
+        const result = this.taskList({ status, deviceId, batchId, limit, offset });
+        return this.json(response, { version: protocolVersion, ...result });
+      }
+
+      const globalTaskAuditPath = url.pathname.match(/^\/api\/tasks\/([^/]+)\/audit$/);
+      if (request.method === 'GET' && globalTaskAuditPath) {
+        const taskId = this.decodeId(globalTaskAuditPath[1]);
+        const task = this.findTask(taskId);
+        if (!task) throw new HttpError(404, 'Task not found');
+        const limit = parseListLimit(url.searchParams.get('limit'));
+        return this.json(response, { version: protocolVersion, audit: this.taskAudit(task.deviceId, taskId, limit) });
       }
 
       const wdaStatusPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/wda-status$/);
@@ -599,6 +701,42 @@ export class ControlDaemon {
         if (!this.devices.get(deviceId)) throw new HttpError(404, 'Device not found');
         const uiTree = await this.controlPlane.getUiHierarchy(deviceId);
         return this.json(response, { version: protocolVersion, deviceId, uiTree });
+      }
+
+      const agentStatePath = url.pathname.match(/^\/api\/devices\/([^/]+)\/agent-state$/);
+      if (request.method === 'GET' && agentStatePath) {
+        const deviceId = this.decodeId(agentStatePath[1]);
+        const agentState = this.agentState(deviceId);
+        if (!agentState) throw new HttpError(404, 'Device not found');
+        return this.json(response, { version: protocolVersion, deviceId, agentState });
+      }
+
+      const taskTracePath = url.pathname.match(/^\/api\/devices\/([^/]+)\/tasks\/([^/]+)\/trace$/);
+      if (request.method === 'GET' && taskTracePath) {
+        const deviceId = this.decodeId(taskTracePath[1]);
+        const taskId = this.decodeId(taskTracePath[2]);
+        this.assertTaskRoute(deviceId, taskId);
+        const limit = parseListLimit(url.searchParams.get('limit'));
+        return this.json(response, { version: protocolVersion, deviceId, taskId, trace: this.taskTrace(deviceId, taskId, limit) });
+      }
+
+      const taskArtifactsPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/tasks\/([^/]+)\/artifacts$/);
+      if (request.method === 'GET' && taskArtifactsPath) {
+        const deviceId = this.decodeId(taskArtifactsPath[1]);
+        const taskId = this.decodeId(taskArtifactsPath[2]);
+        this.assertTaskRoute(deviceId, taskId);
+        const limit = parseListLimit(url.searchParams.get('limit'));
+        const { artifacts, summary } = this.taskArtifacts(deviceId, taskId, limit);
+        return this.json(response, { version: protocolVersion, deviceId, taskId, artifacts, summary });
+      }
+
+      const taskAuditPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/tasks\/([^/]+)\/audit$/);
+      if (request.method === 'GET' && taskAuditPath) {
+        const deviceId = this.decodeId(taskAuditPath[1]);
+        const taskId = this.decodeId(taskAuditPath[2]);
+        this.assertTaskRoute(deviceId, taskId);
+        const limit = parseListLimit(url.searchParams.get('limit'));
+        return this.json(response, { version: protocolVersion, deviceId, taskId, audit: this.taskAudit(deviceId, taskId, limit) });
       }
 
       const framePath = url.pathname.match(/^\/api\/devices\/([^/]+)\/frame$/);
@@ -672,6 +810,27 @@ export class ControlDaemon {
           status: 200,
           payload: { version: protocolVersion, commandId: command.commandId, device: this.configureDevice(command.configuration) },
         }));
+        return this.json(response, result.payload, result.status);
+      }
+
+      const approvalPath = url.pathname.match(/^\/api\/devices\/([^/]+)\/tasks\/([^/]+)\/(approve|reject)$/);
+      if (request.method === 'POST' && approvalPath) {
+        const deviceId = this.decodeId(approvalPath[1]);
+        const taskId = this.decodeId(approvalPath[2]);
+        const action = approvalPath[3];
+        const command = taskApprovalCommandSchema.parse(await this.body(request));
+        if (command.deviceId !== deviceId) throw new HttpError(400, 'deviceId does not match URL');
+        if (command.taskId !== taskId) throw new HttpError(400, 'taskId does not match URL');
+        if (!this.devices.get(deviceId)) throw new HttpError(404, 'Device not found');
+        const result = await this.idempotent(command.commandId, { approval: action, ...command }, async () => {
+          const agentState = action === 'approve'
+            ? this.controlPlane.approveTask(deviceId, taskId)
+            : await this.controlPlane.rejectTask(deviceId, taskId);
+          return {
+            status: 200,
+            payload: { version: protocolVersion, commandId: command.commandId, device: this.deviceSummary(deviceId), agentState },
+          };
+        });
         return this.json(response, result.payload, result.status);
       }
 
@@ -818,7 +977,7 @@ export class ControlDaemon {
 
   private captureBaseline(): void {
     this.devices.getAll().forEach(device => {
-      this.previousDevices.set(device.id, JSON.stringify(toDeviceSummary(device)));
+      this.previousDevices.set(device.id, JSON.stringify(this.toSummary(device)));
       this.collectTasks(device).forEach(task => this.previousTasks.set(task.id, { deviceId: task.deviceId, status: task.status }));
     });
     this.previousWorkers = this.workerSignature();
@@ -826,7 +985,7 @@ export class ControlDaemon {
 
   private publishChanges(): void {
     this.devices.getAll().forEach(device => {
-      const summary = toDeviceSummary(device);
+      const summary = this.toSummary(device);
       const serialized = JSON.stringify(summary);
       const previousSerialized = this.previousDevices.get(device.id);
       const previous = previousSerialized ? JSON.parse(previousSerialized) as DeviceSummaryDTO : undefined;
@@ -882,10 +1041,25 @@ export class ControlDaemon {
     return Array.from(new Map(tasks.map(task => [task.id, task])).values());
   }
 
+  private findTask(taskId: string): TaskInstance | null {
+    for (const device of this.devices.getAll()) {
+      const task = this.collectTasks(device).find(item => item.id === taskId);
+      if (task) return task;
+    }
+    return null;
+  }
+
+  private assertTaskRoute(deviceId: string, taskId: string): void {
+    if (!this.devices.get(deviceId)) throw new HttpError(404, 'Device not found');
+    const task = this.findTask(taskId);
+    if (!task) throw new HttpError(404, 'Task not found');
+    if (task.deviceId !== deviceId) throw new HttpError(400, `taskId ${taskId} belongs to ${task.deviceId}, not ${deviceId}`);
+  }
+
   private eventForTaskStatus(status: TaskStatus): EventType | null {
     if (status === 'WAITING') return 'TASK_QUEUED';
     if (status === 'RUNNING') return 'TASK_STARTED';
-    if (status === 'PAUSED' || status === 'DEVICE_OFFLINE') return 'TASK_PAUSED';
+    if (status === 'PAUSED' || status === 'DEVICE_OFFLINE' || status === 'WAITING_APPROVAL') return 'TASK_PAUSED';
     if (status === 'SUCCESS') return 'TASK_COMPLETED';
     if (status === 'FAILED' || status === 'STOPPED') return 'TASK_FAILED';
     return null;
@@ -1059,6 +1233,25 @@ function resolveDeviceId(devices: DeviceManager, platform: DeviceSession['platfo
   if (!next) throw new Error(`No available ${platform} device slot remains for native binding`);
   claimed.add(next.id);
   return next.id;
+}
+
+function parseListLimit(value: string | null): number {
+  const parsed = Number(value ?? 50);
+  if (!Number.isFinite(parsed)) return 50;
+  return Math.min(100, Math.max(1, Math.trunc(parsed)));
+}
+
+function parseOffset(value: string | null): number {
+  const parsed = Number(value ?? 0);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.trunc(parsed));
+}
+
+function parseTaskStatusFilter(value: string | null): TaskStatus | 'ALL' | undefined {
+  if (!value || value === 'ALL') return undefined;
+  const statuses: TaskStatus[] = ['IDLE', 'WAITING', 'RUNNING', 'SUCCESS', 'FAILED', 'PAUSED', 'STOPPED', 'DEVICE_OFFLINE', 'WAITING_APPROVAL'];
+  if (statuses.includes(value as TaskStatus)) return value as TaskStatus;
+  throw new HttpError(400, `Unsupported task status filter: ${value}`);
 }
 
 function isWdaConnectable(status: IOSWdaStatusDTO): boolean {

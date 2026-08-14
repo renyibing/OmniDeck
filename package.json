@@ -7,6 +7,10 @@
     "dev": "concurrently -k \"npm:dev:daemon\" \"npm:dev:web\"",
     "dev:web": "vite",
     "dev:daemon": "tsx watch src/server/index.ts",
+    "desktop:dev": "tauri dev",
+    "desktop:dev:android": "tsx scripts/desktop-android-dev.ts",
+    "desktop:build": "tauri build",
+    "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "start:daemon": "tsx src/server/index.ts",
     "smoke:android-actions": "tsx scripts/android-action-smoke.ts",
     "build": "tsc -b && vite build",
@@ -14,6 +18,7 @@
     "lint": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
     "@vitejs/plugin-react": "latest",
     "lucide-react": "latest",
     "react": "latest",
@@ -22,6 +27,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^26.2.0",
     "@types/react": "latest",
     "@types/react-dom": "latest",

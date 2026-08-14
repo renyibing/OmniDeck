@@ -1,6 +1,7 @@
 import type { DeviceHealth, StreamProfile } from './types';
 import type { DeviceDriverAdapter, LongPressRequest, MonitorFrame, NormalizedPoint, ScreenshotRequest, ScreenshotResult, ScrollWheelRequest, SwipeRequest, DevicePressKey } from './deviceDriver';
 import type { UiHierarchy } from './androidUiHierarchy';
+import { parseWdaSourceXml } from './iosUiHierarchy';
 
 export interface IOSXCUITestDriverOptions {
   udid: string;
@@ -112,8 +113,18 @@ export class IOSXCUITestDriver implements DeviceDriverAdapter {
     }
   }
 
-  async getUiHierarchy(_signal?: AbortSignal): Promise<UiHierarchy> {
-    throw new Error(`iOS UI hierarchy retrieval is not implemented for ${this.deviceId} (${this.options.udid}); use WDA readiness first and add a /source adapter before enabling this action`);
+  async getUiHierarchy(signal?: AbortSignal): Promise<UiHierarchy> {
+    if (!this.connected) throw new Error(`iOS device ${this.deviceId} (${this.options.udid}) is not connected`);
+    if (!this.sessionId) throw new Error(`iOS device ${this.deviceId} (${this.options.udid}) has no active XCUITest session`);
+    const response = await this.requestWda(
+      `/session/${encodeURIComponent(this.sessionId)}/source`,
+      { signal },
+      'ui source',
+      WDA_READ_TIMEOUT_MS,
+    );
+    if (!response.ok) throw new Error(`Unable to read iOS UI source for ${this.deviceId} (${this.options.udid}): HTTP ${response.status}`);
+    const payload = await response.json() as { value?: string };
+    return parseWdaSourceXml(typeof payload.value === 'string' ? payload.value : '');
   }
 
   async getScreenSize(signal?: AbortSignal): Promise<{ width: number; height: number }> {
@@ -193,7 +204,9 @@ export class IOSXCUITestDriver implements DeviceDriverAdapter {
     await this.command('/wda/pressButton', 'POST', { name: 'home' }, signal);
   }
 
-  async launchApp(appId: string, signal?: AbortSignal): Promise<void> { await this.command('/wda/apps/launch', 'POST', { bundleId: appId }, signal); }
+  async launchApp(appId: string, signal?: AbortSignal): Promise<void> {
+    await this.command('/wda/apps/launch', 'POST', { bundleId: appId, shouldWaitForQuiescence: false }, signal);
+  }
   async restartApp(appId: string, signal?: AbortSignal): Promise<void> { await this.command('/wda/apps/terminate', 'POST', { bundleId: appId }, signal); await this.launchApp(appId, signal); }
   async stopApp(appId: string, signal?: AbortSignal): Promise<void> { await this.command('/wda/apps/terminate', 'POST', { bundleId: appId }, signal); }
   async performGoalStep(_goal?: string, signal?: AbortSignal): Promise<void> { await this.screenshot({ purpose: 'AI', width: 1440, height: 2560 }, signal); }
@@ -385,7 +398,10 @@ export class IOSXCUITestDriver implements DeviceDriverAdapter {
       signal,
     }, `command ${path}`, timeoutMs);
     if (!response.ok) {
-      const message = `XCUITest command failed for ${this.deviceId} (${this.options.udid}): ${path} HTTP ${response.status}`;
+      const detail = await describeWdaErrorResponse(response);
+      const message = detail
+        ? `XCUITest command failed for ${this.deviceId} (${this.options.udid}): ${path} HTTP ${response.status}: ${detail}`
+        : `XCUITest command failed for ${this.deviceId} (${this.options.udid}): ${path} HTTP ${response.status}`;
       if (isRecoverableSessionStatus(response.status)) throw new RecoverableWdaSessionError(message);
       throw new Error(message);
     }
@@ -529,6 +545,29 @@ function mergeAbortSignals(signal: AbortSignal | undefined, timeoutMs: number): 
 function isTimeoutError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /timed out|timeout|aborted without reason|canceled|cancelled/i.test(error.message);
+}
+
+export function describeWdaErrorValue(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 400);
+  if (!value || typeof value !== 'object') return null;
+  const record = value as { error?: unknown; message?: unknown };
+  const error = typeof record.error === 'string' ? record.error : '';
+  const message = typeof record.message === 'string' ? record.message : '';
+  const bundle = /returned nil for "([^"]+)"/u.exec(message)?.[1];
+  if (bundle || /FBSOpenApplicationErrorDomain Code=4|BSErrorCodeDescription=NotFound/u.test(message)) {
+    return bundle ? `app not installed (${bundle})` : 'app not installed';
+  }
+  const combined = [error, message.replace(/\s+/g, ' ').trim()].filter(Boolean).join(': ');
+  return combined ? combined.slice(0, 400) : null;
+}
+
+async function describeWdaErrorResponse(response: Response): Promise<string | null> {
+  try {
+    const payload = await response.json() as { value?: unknown };
+    return describeWdaErrorValue(payload.value);
+  } catch {
+    return null;
+  }
 }
 
 function isRecoverableSessionStatus(status: number): boolean {

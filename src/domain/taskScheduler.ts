@@ -21,7 +21,22 @@ export class TaskScheduler {
     const batchId = `batch-${Date.now()}-${++this.batchSequence}`;
     return deviceIds.map((deviceId, index) => {
       const now = Date.now();
-      return { id: `${batchId}-${index + 1}`, batchId, deviceId, goal, status: 'WAITING', priority, attempts: 0, createdAt: now, updatedAt: now };
+      return {
+        id: `${batchId}-${index + 1}`,
+        batchId,
+        deviceId,
+        goal,
+        status: 'WAITING',
+        priority,
+        attempts: 0,
+        createdAt: now,
+        updatedAt: now,
+        maxSteps: 24,
+        currentStepIndex: 0,
+        completedSteps: 0,
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimatedCostUsd: null, known: false },
+        latencyMs: { plannerMs: 0, actionMs: 0, verificationMs: 0, totalStepMs: 0, totalRunMs: 0 },
+      };
     });
   }
 }

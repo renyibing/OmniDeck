@@ -1,6 +1,6 @@
 # OmniDeck 需求分析文档
 
-更新时间：2026-08-12
+更新时间：2026-08-13
 文档定位：基于产品需求与当前仓库实现状态整理的需求分析文档
 
 ## 1. 产品定义
@@ -170,6 +170,7 @@ Device Wall 是产品核心界面，要求：
 - Live View
 - Device Control
 - Agent 操作
+- Agent Step Trace / Approval 状态
 - Timeline
 - Device Information
 
@@ -189,8 +190,8 @@ Device Wall 是产品核心界面，要求：
 
 说明：
 
-- 当前仓库已实现 screenshot、tap、launch/restart app、health、preview frame 等核心子集。
-- swipe、input text、long press 等为后续扩展项。
+- 当前仓库已实现 screenshot、monitor frame、UI hierarchy、screen size、tap、swipe、long press、input text、press key、back、home、launch/restart/stop app、health 等基础能力。
+- Android ADB 路径已强制 `-s <serial>`；iOS XCUITest/WDA 路径仍需真机 readiness 与 provisioning 验收。
 
 ### 6.5 AI Agent
 
@@ -290,7 +291,11 @@ AI Agent 需遵循：
 - Progress
 - Success / Failed
 - Duration
+- Step Trace
+- Artifact Summary
 - AI Cost
+
+当前实现状态：已具备 Task Center baseline，可查看全局轻量任务索引、按 status/device 过滤、选中任务后加载 bounded trace/artifact metadata，并可对 `WAITING_APPROVAL` 任务执行 approve/reject。Agent 多步执行会按 `TaskInstance` 累加 token、estimated cost 与 latency 指标，Task Center summary / audit 可展示这些聚合字段；尚未具备持久化审计库、预算管理面和复杂分页检索体验。
 
 ### 6.12 Agent Timeline
 
@@ -317,6 +322,8 @@ AI Agent 需遵循：
 - Token
 - Cost
 
+当前实现补充：已具备 selected-task `trace` / `artifacts` 只读接口和 Inspector 内 Task Audit 摘要，artifact 仅保存 metadata / redacted payload；Agent step trace 已记录单步 planner/action/verification latency 和 provider usage metadata；尚未具备持久化 artifact 文件库、AI 预算管理和成本报表。
+
 ## 7. 平台需求
 
 ### 7.1 Android
@@ -337,8 +344,10 @@ AI Agent 需遵循：
 
 - 显式 `adb -s <serial>` 作用域
 - screenshot
-- tap
-- launch/restart app
+- UIAutomator hierarchy dump / parse / selected-device 读取
+- tap / swipe / long press / input text / key / back / home
+- launch/restart/stop app
+- Agent action 后 UI hierarchy 与截图再观察基础闭环
 - 可选 scrcpy 进程监督
 
 ### 7.2 iOS
@@ -462,7 +471,8 @@ AI 截图与监控流必须分离。
 - scrcpy
 - 1/4/8 布局
 - Agent loop
-- VLM + planner + action + verify
+- DeepSeek text planner + action + verify
+- VLM grounding + screenshot reasoning provider
 - timeline
 - human approval
 - human takeover
@@ -479,6 +489,7 @@ AI 截图与监控流必须分离。
 - Worker Pool
 - Task Queue
 - Batch Task
+- Tauri 2 Desktop Native Host：本机 daemon 守护、日志尾部、Android scrcpy / iOS iproxy 进程监督与 iOS WDA 本地端口分配
 - Device Group
 - Workspace
 - Health Monitor
@@ -539,15 +550,18 @@ AI 截图与监控流必须分离。
 - 基于预览点击的单设备人工操控
 - Android + iOS 混合真机绑定
 - Device Group / Workspace 基础支持
+- Agent Step Trace 与内存态 Agent Artifact Store 基础审计
+- selected-device / selected-task 只读审计路由，wall summary 保持轻量
+- Task Center baseline：全局轻量任务索引、selected-task audit drawer、WAITING_APPROVAL 审批入口
 
 ### 13.2 尚未完整落地
 
 - 真正实时视频网关
-- UIAutomator / UI hierarchy 全链路
-- Swipe / input text / long press 等完整人工动作集
-- Human Approval 完整策略中心
-- AI Provider 与 AI Cost 管理面
-- Task Center 独立主界面
+- UIAutomator / UI hierarchy 已具备基础闭环，但仍需多 ROM、WebView/自绘 UI 和长任务验证
+- Swipe / input text / long press 等人工动作集已具备基础实现，但仍需真机稳定性矩阵
+- Human Approval、Agent Step Trace、Task Center 与 Task Audit artifact baseline 已具备，仍缺完整策略中心、持久化审计库和真实敏感动作验收
+- AI Provider 已具备 DeepSeek text planner baseline；仍缺 AI Cost 管理面与预算策略
+- Task Center 复杂分页/搜索/导出能力
 - Device Node 分布式模式
 
 ## 14. MVP 验收口径
